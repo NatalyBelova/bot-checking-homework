@@ -6,29 +6,35 @@ from aiogram.filters import Command
 from config import TOKEN, REVIEWERS
 import db
 
+# Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+# Инициализация базы данных (создание таблиц)
 db.init_db()
 
-# 👉 хранение состояния "ждём комментарий"
+# Состояние: проверяющий написал "доработка" и бот ждёт комментарий
 review_state = {}
 
+# Временное хранение ДЗ до подтверждения отправки
 pending_homeworks = {}
 
 
-# 🟢 START
+# Команда /start
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Отправь домашку текстом")
 
 
-# 📨 Ученик отправляет ДЗ
+# Основной обработчик сообщений (ученик + комментарии)
 @dp.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
 
+    # Получаем текст (или подпись к фото)
     text = message.text or message.caption
+
+    # Определяем файл (если есть)
     file_id = None
     file_type = None
 
@@ -44,13 +50,15 @@ async def handle_message(message: types.Message):
         file_id = message.video.file_id
         file_type = "video"
 
-    # 🟡 комментарий от проверяющего
+    # Если это комментарий от проверяющего
     if user_id in review_state:
         homework_id = review_state[user_id]
 
+        # меняем статус и сохраняем комментарий
         db.update_status(homework_id, "revision")
         db.add_comment(homework_id, text)
 
+        # отправляем комментарий ученику
         student_id = db.get_student_id(homework_id)
 
         await bot.send_message(
@@ -58,16 +66,22 @@ async def handle_message(message: types.Message):
             f"Нужно доработать:\n{text}"
         )
 
+        # очищаем состояние
         del review_state[user_id]
         return
 
-    # 🟢 сохраняем как pending
+    # Проверяем: это новое ДЗ или доработка
+    existing_hw = db.get_active_homework(user_id)
+
+    # Сохраняем во временное хранилище до подтверждения
     pending_homeworks[user_id] = {
         "text": text,
         "file_id": file_id,
-        "file_type": file_type
+        "file_type": file_type,
+        "is_revision": bool(existing_hw)
     }
 
+    # Кнопки подтверждения
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_send"),
@@ -75,39 +89,45 @@ async def handle_message(message: types.Message):
         ]
     ])
 
-    await message.answer("Отправить домашнее задание?", reply_markup=keyboard)
+    # Разный текст для нового ДЗ и доработки
+    question = "🔄 Отправить доработку?" if existing_hw else "📤 Отправить домашнее задание?"
+
+    await message.answer(question, reply_markup=keyboard)
 
 
-
-# ✅ Принять
+# Принять ДЗ
 @dp.callback_query(lambda c: c.data.startswith("accept"))
 async def accept(callback: types.CallbackQuery):
     homework_id = int(callback.data.split("_")[1])
 
+    # меняем статус
     db.update_status(homework_id, "accepted")
 
+    # уведомляем ученика
     student_id = db.get_student_id(homework_id)
-
     await bot.send_message(student_id, "ДЗ принято ✅")
+
     await callback.answer("Принято")
 
 
-# ✏️ На доработку
+# Отправить на доработку
 @dp.callback_query(lambda c: c.data.startswith("revise"))
 async def revise(callback: types.CallbackQuery):
     homework_id = int(callback.data.split("_")[1])
 
+    # сохраняем, что ждём комментарий от этого проверяющего
     review_state[callback.from_user.id] = homework_id
 
     await callback.message.answer("Напиши комментарий для доработки")
     await callback.answer()
 
 
-
+# Подтверждение отправки ДЗ
 @dp.callback_query(lambda c: c.data == "confirm_send")
 async def confirm_send(callback: types.CallbackQuery):
     user_id = callback.from_user.id
 
+    # достаём сохранённое ДЗ
     data = pending_homeworks.get(user_id)
 
     if not data:
@@ -118,6 +138,7 @@ async def confirm_send(callback: types.CallbackQuery):
     file_id = data["file_id"]
     file_type = data["file_type"]
 
+    # проверяем: новое или доработка
     existing_hw = db.get_active_homework(user_id)
 
     if existing_hw:
@@ -130,6 +151,7 @@ async def confirm_send(callback: types.CallbackQuery):
 
     caption = f"{title}\n{text or ''}"
 
+    # Кнопки для проверяющего
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
@@ -137,6 +159,7 @@ async def confirm_send(callback: types.CallbackQuery):
         ]
     ])
 
+    # Отправка проверяющим (с учётом типа файла)
     for reviewer in REVIEWERS:
         if file_id:
             if file_type == "photo":
@@ -151,19 +174,26 @@ async def confirm_send(callback: types.CallbackQuery):
     await callback.message.answer("ДЗ отправлено на проверку ✅")
     await callback.answer()
 
+    # очищаем временные данные
     del pending_homeworks[user_id]
 
+
+# Отмена отправки
 @dp.callback_query(lambda c: c.data == "cancel_send")
 async def cancel_send(callback: types.CallbackQuery):
     user_id = callback.from_user.id
 
+    # удаляем из временного хранилища
     pending_homeworks.pop(user_id, None)
 
     await callback.message.answer("Отправка отменена ❌")
     await callback.answer()
 
+
+# Запуск бота
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
