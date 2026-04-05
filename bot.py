@@ -50,7 +50,7 @@ async def handle_message(message: types.Message):
         file_id = message.video.file_id
         file_type = "video"
 
-    # Если это комментарий от проверяющего
+    # комментарий от проверяющего
     if user_id in review_state:
         homework_id = review_state[user_id]
 
@@ -70,27 +70,20 @@ async def handle_message(message: types.Message):
         del review_state[user_id]
         return
 
-    # Проверяем: это новое ДЗ или доработка
+    # получаем активное ДЗ
     existing_hw = db.get_active_homework(user_id)
 
-    if not existing_hw:
-        # fallback — берём последнее ДЗ пользователя
-        cursor = db.cursor
-        cursor.execute("""
-        SELECT id FROM homeworks
-        WHERE student_id=?
-        ORDER BY id DESC LIMIT 1
-        """, (user_id,))
+    is_revision = False
 
-        result = cursor.fetchone()
-        existing_hw = result[0] if result else None
+    if existing_hw:
+        status = db.get_homework_status(existing_hw)
+        is_revision = (status == "revision")
 
-    # Сохраняем во временное хранилище до подтверждения
+    # сохраняем данные
     pending_homeworks[user_id] = {
         "text": text,
         "file_id": file_id,
         "file_type": file_type,
-        "is_revision": bool(existing_hw)
     }
 
     # Кнопки подтверждения
@@ -101,8 +94,7 @@ async def handle_message(message: types.Message):
         ]
     ])
 
-    # Разный текст для нового ДЗ и доработки
-    question = "🔄 Отправить доработку?" if existing_hw else "📤 Отправить домашнее задание?"
+    question = "🔄 Отправить доработку?" if is_revision else "📤 Отправить домашнее задание?"
 
     await message.answer(question, reply_markup=keyboard)
 
@@ -117,6 +109,10 @@ async def accept(callback: types.CallbackQuery):
 
     # уведомляем ученика
     student_id = db.get_student_id(homework_id)
+
+    # 🔥 чистим pending
+    pending_homeworks.pop(student_id, None)
+
     await bot.send_message(student_id, "ДЗ принято ✅")
 
     await callback.answer("Принято")
@@ -154,10 +150,23 @@ async def confirm_send(callback: types.CallbackQuery):
     existing_hw = db.get_active_homework(user_id)
 
     if existing_hw:
-        db.add_version(existing_hw, text, file_id, file_type)
-        homework_id = existing_hw
-        title = f"ДЗ #{homework_id} (доработка)"
+        status = db.get_homework_status(existing_hw)
+
+        if status == "revision":
+            # это доработка
+            db.add_version(existing_hw, text, file_id, file_type)
+            db.update_status(existing_hw, "new")
+
+            homework_id = existing_hw
+            title = f"ДЗ #{homework_id} (доработка)"
+
+        else:
+            # новое ДЗ после accepted
+            homework_id = db.create_homework(user_id, text, file_id, file_type)
+            title = f"Новое ДЗ #{homework_id}"
+
     else:
+        # вообще первое ДЗ
         homework_id = db.create_homework(user_id, text, file_id, file_type)
         title = f"Новое ДЗ #{homework_id}"
 
@@ -186,8 +195,8 @@ async def confirm_send(callback: types.CallbackQuery):
     await callback.message.answer("ДЗ отправлено на проверку ✅")
     await callback.answer()
 
-    # очищаем временные данные
-    del pending_homeworks[user_id]
+    # очищаем состояние
+    pending_homeworks.pop(user_id, None)
 
 
 # Отмена отправки

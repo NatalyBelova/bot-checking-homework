@@ -112,10 +112,9 @@ def get_student_id(homework_id):
 
 
 def get_active_homework(student_id):
-    # Получаем последнее ДЗ на доработке (если есть)
     cursor.execute("""
     SELECT id FROM homeworks
-    WHERE student_id=? AND status='revision'
+    WHERE student_id=? AND status IN ('revision', 'new')
     ORDER BY id DESC LIMIT 1
     """, (student_id,))
 
@@ -151,4 +150,11 @@ def get_current_version(homework_id):
     SELECT current_version FROM homeworks WHERE id=?
     """, (homework_id,))
 
+    return cursor.fetchone()[0]
+
+def get_homework_status(homework_id):
+    cursor.execute(
+        "SELECT status FROM homeworks WHERE id=?",
+        (homework_id,)
+    )
     return cursor.fetchone()[0]
