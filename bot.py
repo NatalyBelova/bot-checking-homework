@@ -73,6 +73,18 @@ async def handle_message(message: types.Message):
     # Проверяем: это новое ДЗ или доработка
     existing_hw = db.get_active_homework(user_id)
 
+    if not existing_hw:
+        # fallback — берём последнее ДЗ пользователя
+        cursor = db.cursor
+        cursor.execute("""
+        SELECT id FROM homeworks
+        WHERE student_id=?
+        ORDER BY id DESC LIMIT 1
+        """, (user_id,))
+
+        result = cursor.fetchone()
+        existing_hw = result[0] if result else None
+
     # Сохраняем во временное хранилище до подтверждения
     pending_homeworks[user_id] = {
         "text": text,

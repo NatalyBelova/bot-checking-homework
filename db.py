@@ -87,11 +87,18 @@ def update_status(homework_id, status):
 
 
 def add_comment(homework_id, comment):
-    # Добавление комментария к последней версии ДЗ
-    cursor.execute(
-        "UPDATE versions SET comment=? WHERE homework_id=?",
-        (comment, homework_id)
+    # Добавление комментария к последней версии дз
+    cursor.execute("""
+    UPDATE versions
+    SET comment=?
+    WHERE id = (
+        SELECT id FROM versions
+        WHERE homework_id=?
+        ORDER BY id DESC
+        LIMIT 1
     )
+    """, (comment, homework_id))
+
     conn.commit()
 
 
