@@ -51,7 +51,10 @@ async def process_media_group(group_id, user_id):
             text = msg.caption
 
         if msg.photo:
-            files.append(msg.photo[-1].file_id)
+            files.append(("photo", msg.photo[-1].file_id))
+
+        elif msg.document:
+            files.append(("document", msg.document.file_id))
 
     pending_homeworks[user_id] = {
         "text": text,
@@ -83,8 +86,8 @@ async def process_single_message(message, user_id):
 async def send_confirm(user_id, message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="Отправить", callback_data="confirm_send"),
-            InlineKeyboardButton(text="Отмена", callback_data="cancel_send")
+            InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_send"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send")
         ]
     ])
 
@@ -324,18 +327,31 @@ async def confirm_send(callback: types.CallbackQuery):
     # --- отправка ревьюерам ---
     for reviewer in REVIEWERS:
 
-        # если это альбом
+        # если альбом (несколько файлов)
         if data.get("file_type") == "photo_group":
-            media = [InputMediaPhoto(media=file_id) for file_id in data["files"]]
+            files = data.get("files", [])
 
-            await bot.send_media_group(reviewer, media)
+            # делим на фото и документы
+            photos = [f for f in files if f[0] == "photo"]
+            docs = [f for f in files if f[0] == "document"]
 
+            # --- фото альбомом ---
+            if photos:
+                media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
+                await bot.send_media_group(reviewer, media)
+
+            # --- документы по одному ---
+            for _, file_id in docs:
+                await bot.send_document(reviewer, file_id)
+
+            # --- текст + кнопки ---
             await bot.send_message(
                 reviewer,
                 caption,
                 reply_markup=keyboard
             )
 
+        # --- одиночный файл ---
         else:
             file_id = data.get("file_id")
             file_type = data.get("file_type")
@@ -353,7 +369,6 @@ async def confirm_send(callback: types.CallbackQuery):
     await callback.message.answer("ДЗ отправлено на проверку ✅")
     await callback.answer()
 
-    # очищаем состояние
     pending_homeworks.pop(user_id, None)
 
 
