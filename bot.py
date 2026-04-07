@@ -1,10 +1,13 @@
 import asyncio
+import db
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
-
 from config import TOKEN, REVIEWERS
-import db
+from collections import defaultdict
+from aiogram.types import InputMediaPhoto
+
+
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
@@ -19,74 +22,224 @@ review_state = {}
 # Временное хранение ДЗ до подтверждения отправки
 pending_homeworks = {}
 
+media_groups = defaultdict(list)
+media_tasks = {}
+
+review_media_groups = defaultdict(list)
+review_media_tasks = {}
+
 
 # Команда /start
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer("Отправь домашку текстом")
 
+async def process_media_group(group_id, user_id):
+    await asyncio.sleep(0.8)  # ждем все сообщения альбома
 
-# Основной обработчик сообщений (ученик + комментарии)
-@dp.message()
-async def handle_message(message: types.Message):
-    user_id = message.from_user.id
+    messages = media_groups.pop(group_id, [])
+    media_tasks.pop(group_id, None)
 
-    # Получаем текст (или подпись к фото)
-    text = message.text or message.caption
+    if not messages:
+        return
 
-    # Определяем файл (если есть)
+    files = []
+    text = ""
+
+    for msg in messages:
+        if msg.caption and not text:
+            text = msg.caption
+
+        if msg.photo:
+            files.append(msg.photo[-1].file_id)
+
+    pending_homeworks[user_id] = {
+        "text": text,
+        "files": files,
+        "file_type": "photo_group"
+    }
+
+    await send_confirm(user_id, messages[-1])
+
+async def process_single_message(message, user_id):
+    file_id = None
+    file_type = None
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        file_type = "photo"
+    elif message.document:
+        file_id = message.document.file_id
+        file_type = "document"
+
+    pending_homeworks[user_id] = {
+        "text": message.text or message.caption or "",
+        "file_id": file_id,
+        "file_type": file_type
+    }
+
+    await send_confirm(user_id, message)
+
+async def send_confirm(user_id, message):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Отправить", callback_data="confirm_send"),
+            InlineKeyboardButton(text="Отмена", callback_data="cancel_send")
+        ]
+    ])
+
+    await message.answer("📤 Отправить домашнее задание?", reply_markup=keyboard)
+
+async def process_review_media_group(group_id, user_id):
+    await asyncio.sleep(0.8)
+
+    messages = review_media_groups.pop(group_id, [])
+    review_media_tasks.pop(group_id, None)
+
+    if not messages:
+        return
+
+    homework_id = review_state[user_id]
+    student_id = db.get_student_id(homework_id)
+
+    files = []
+    text = ""
+
+    for msg in messages:
+        if msg.caption and not text:
+            text = msg.caption
+
+        if msg.photo:
+            files.append(msg.photo[-1].file_id)
+
+    db.update_status(homework_id, "revision")
+    db.add_comment(homework_id, text)
+
+    caption = f"Нужно доработать:\n{text or ''}"
+
+    # отправляем альбом
+    media = [InputMediaPhoto(file_id) for file_id in files]
+    await bot.send_media_group(student_id, media)
+
+    # отправляем текст отдельно
+    if text:
+        await bot.send_message(student_id, caption)
+
+    # отбивка валидатору
+    await bot.send_message(user_id, "Комментарий отправлен ученику ✏️")
+
+    del review_state[user_id]
+
+
+async def process_single_review(message, user_id):
+    homework_id = review_state[user_id]
+    student_id = db.get_student_id(homework_id)
+
+    text = message.text or message.caption or ""
+
     file_id = None
     file_type = None
 
     if message.document:
         file_id = message.document.file_id
         file_type = "document"
-
     elif message.photo:
         file_id = message.photo[-1].file_id
         file_type = "photo"
-
     elif message.video:
         file_id = message.video.file_id
         file_type = "video"
 
-    # комментарий от проверяющего
-    if user_id in review_state:
-        homework_id = review_state[user_id]
+    db.update_status(homework_id, "revision")
+    db.add_comment(homework_id, text)
 
-        # меняем статус и сохраняем комментарий
-        db.update_status(homework_id, "revision")
-        db.add_comment(homework_id, text)
+    caption = f"Нужно доработать:\n{text or ''}"
 
-        # отправляем комментарий ученику
-        student_id = db.get_student_id(homework_id)
+    if file_id:
+        if file_type == "photo":
+            await bot.send_photo(student_id, file_id, caption=caption)
+        elif file_type == "video":
+            await bot.send_video(student_id, file_id, caption=caption)
+        else:
+            await bot.send_document(student_id, file_id, caption=caption)
+    else:
+        await bot.send_message(student_id, caption)
 
-        await bot.send_message(
-            student_id,
-            f"Нужно доработать:\n{text}"
+    await message.answer("Комментарий отправлен ученику ✏️")
+
+    del review_state[user_id]
+
+# Основной обработчик сообщений (ученик + комментарии)
+@dp.message()
+async def handle_message(message: types.Message):
+    user_id = message.from_user.id
+
+    # --- если альбом ---
+    if message.media_group_id:
+        group_id = message.media_group_id
+
+        media_groups[group_id].append(message)
+
+        if group_id in media_tasks:
+            media_tasks[group_id].cancel()
+
+        media_tasks[group_id] = asyncio.create_task(
+            process_media_group(group_id, user_id)
         )
 
-        # очищаем состояние
-        del review_state[user_id]
         return
 
-    # получаем активное ДЗ
+    # --- комментарий от проверяющего ---
+    if user_id in review_state:
+
+        # если альбом (несколько файлов)
+        if message.media_group_id:
+            group_id = message.media_group_id
+
+            review_media_groups[group_id].append(message)
+
+            if group_id in review_media_tasks:
+                review_media_tasks[group_id].cancel()
+
+            review_media_tasks[group_id] = asyncio.create_task(
+                process_review_media_group(group_id, user_id)
+            )
+
+            return
+
+        # одиночный комментарий
+        await process_single_review(message, user_id)
+        return
+
+    # --- обычное ДЗ ---
+    file_id = None
+    file_type = None
+
+    if message.document:
+        file_id = message.document.file_id
+        file_type = "document"
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+        file_type = "photo"
+    elif message.video:
+        file_id = message.video.file_id
+        file_type = "video"
+
+    text = message.text or message.caption or ""
+
     existing_hw = db.get_active_homework(user_id)
 
     is_revision = False
-
     if existing_hw:
         status = db.get_homework_status(existing_hw)
         is_revision = (status == "revision")
 
-    # сохраняем данные
     pending_homeworks[user_id] = {
         "text": text,
         "file_id": file_id,
         "file_type": file_type,
     }
 
-    # Кнопки подтверждения
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_send"),
@@ -115,7 +268,10 @@ async def accept(callback: types.CallbackQuery):
 
     await bot.send_message(student_id, "ДЗ принято ✅")
 
-    await callback.answer("Принято")
+    # сообщение валидатору в чат
+    await callback.message.answer("ДЗ принято ✅")
+
+    await callback.answer()
 
 
 # Отправить на доработку
@@ -142,37 +298,22 @@ async def confirm_send(callback: types.CallbackQuery):
         await callback.answer("Нет данных")
         return
 
-    text = data["text"]
-    file_id = data["file_id"]
-    file_type = data["file_type"]
+    text = data.get("text", "")
 
-    # проверяем: новое или доработка
+    # --- логика создания/обновления ДЗ ---
     existing_hw = db.get_active_homework(user_id)
 
     if existing_hw:
-        status = db.get_homework_status(existing_hw)
-
-        if status == "revision":
-            # это доработка
-            db.add_version(existing_hw, text, file_id, file_type)
-            db.update_status(existing_hw, "new")
-
-            homework_id = existing_hw
-            title = f"ДЗ #{homework_id} (доработка)"
-
-        else:
-            # новое ДЗ после accepted
-            homework_id = db.create_homework(user_id, text, file_id, file_type)
-            title = f"Новое ДЗ #{homework_id}"
-
+        homework_id = existing_hw
+        db.add_version(homework_id, text, None, data.get("file_type"))
+        db.update_status(homework_id, "new")
+        title = f"ДЗ #{homework_id} (доработка)"
     else:
-        # вообще первое ДЗ
-        homework_id = db.create_homework(user_id, text, file_id, file_type)
+        homework_id = db.create_homework(user_id, text, None, data.get("file_type"))
         title = f"Новое ДЗ #{homework_id}"
 
     caption = f"{title}\n{text or ''}"
 
-    # Кнопки для проверяющего
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
@@ -180,17 +321,34 @@ async def confirm_send(callback: types.CallbackQuery):
         ]
     ])
 
-    # Отправка проверяющим (с учётом типа файла)
+    # --- отправка ревьюерам ---
     for reviewer in REVIEWERS:
-        if file_id:
-            if file_type == "photo":
-                await bot.send_photo(reviewer, file_id, caption=caption, reply_markup=keyboard)
-            elif file_type == "video":
-                await bot.send_video(reviewer, file_id, caption=caption, reply_markup=keyboard)
-            else:
-                await bot.send_document(reviewer, file_id, caption=caption, reply_markup=keyboard)
+
+        # 🔥если это альбом
+        if data.get("file_type") == "photo_group":
+            media = [InputMediaPhoto(file_id) for file_id in data["files"]]
+
+            await bot.send_media_group(reviewer, media)
+
+            await bot.send_message(
+                reviewer,
+                caption,
+                reply_markup=keyboard
+            )
+
         else:
-            await bot.send_message(reviewer, caption, reply_markup=keyboard)
+            file_id = data.get("file_id")
+            file_type = data.get("file_type")
+
+            if file_id:
+                if file_type == "photo":
+                    await bot.send_photo(reviewer, file_id, caption=caption, reply_markup=keyboard)
+                elif file_type == "video":
+                    await bot.send_video(reviewer, file_id, caption=caption, reply_markup=keyboard)
+                else:
+                    await bot.send_document(reviewer, file_id, caption=caption, reply_markup=keyboard)
+            else:
+                await bot.send_message(reviewer, caption, reply_markup=keyboard)
 
     await callback.message.answer("ДЗ отправлено на проверку ✅")
     await callback.answer()
