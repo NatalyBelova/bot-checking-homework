@@ -32,7 +32,7 @@ review_media_tasks = {}
 # Команда /start
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Отправь домашку текстом")
+    await message.answer("Отправь домашнее задание")
 
 async def process_media_group(group_id, user_id):
     await asyncio.sleep(0.8)  # ждем все сообщения альбома
