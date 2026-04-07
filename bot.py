@@ -213,6 +213,7 @@ async def cancel_send(callback: types.CallbackQuery):
 
 # Запуск бота
 async def main():
+    print(f"REWIEVERS: {REVIEWERS}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
