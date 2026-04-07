@@ -118,7 +118,7 @@ async def process_review_media_group(group_id, user_id):
     caption = f"Нужно доработать:\n{text or ''}"
 
     # отправляем альбом
-    media = [InputMediaPhoto(file_id) for file_id in files]
+    media = [InputMediaPhoto(media=file_id) for file_id in files]
     await bot.send_media_group(student_id, media)
 
     # отправляем текст отдельно
@@ -324,9 +324,9 @@ async def confirm_send(callback: types.CallbackQuery):
     # --- отправка ревьюерам ---
     for reviewer in REVIEWERS:
 
-        # 🔥если это альбом
+        # если это альбом
         if data.get("file_type") == "photo_group":
-            media = [InputMediaPhoto(file_id) for file_id in data["files"]]
+            media = [InputMediaPhoto(media=file_id) for file_id in data["files"]]
 
             await bot.send_media_group(reviewer, media)
 
