@@ -108,6 +108,7 @@ async def process_review_media_group(group_id, user_id):
     files = []
     text = ""
 
+    # --- сначала собираем данные ---
     for msg in messages:
         if msg.caption and not text:
             text = msg.caption
@@ -115,20 +116,25 @@ async def process_review_media_group(group_id, user_id):
         if msg.photo:
             files.append(msg.photo[-1].file_id)
 
+        elif msg.document:
+            files.append(msg.document.file_id)
+
+    # --- обновляем БД ---
     db.update_status(homework_id, "revision")
     db.add_comment(homework_id, text)
 
     caption = f"Нужно доработать:\n{text or ''}"
 
-    # отправляем альбом
-    media = [InputMediaPhoto(media=file_id) for file_id in files]
-    await bot.send_media_group(student_id, media)
+    # --- отправляем файлы ---
+    if files:
+        media = [InputMediaPhoto(media=file_id) for file_id in files]
+        await bot.send_media_group(student_id, media)
 
-    # отправляем текст отдельно
+    # --- отправляем текст ---
     if text:
         await bot.send_message(student_id, caption)
 
-    # отбивка валидатору
+    # --- отбивка валидатору ---
     await bot.send_message(user_id, "Комментарий отправлен ученику ✏️")
 
     del review_state[user_id]
@@ -177,25 +183,9 @@ async def process_single_review(message, user_id):
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
 
-    # --- если альбом ---
-    if message.media_group_id:
-        group_id = message.media_group_id
-
-        media_groups[group_id].append(message)
-
-        if group_id in media_tasks:
-            media_tasks[group_id].cancel()
-
-        media_tasks[group_id] = asyncio.create_task(
-            process_media_group(group_id, user_id)
-        )
-
-        return
-
-    # --- комментарий от проверяющего ---
+    # --- 1. комментарий от валидатора ---
     if user_id in review_state:
 
-        # если альбом (несколько файлов)
         if message.media_group_id:
             group_id = message.media_group_id
 
@@ -214,7 +204,22 @@ async def handle_message(message: types.Message):
         await process_single_review(message, user_id)
         return
 
-    # --- обычное ДЗ ---
+    # --- 2. если альбом (ДЗ) ---
+    if message.media_group_id:
+        group_id = message.media_group_id
+
+        media_groups[group_id].append(message)
+
+        if group_id in media_tasks:
+            media_tasks[group_id].cancel()
+
+        media_tasks[group_id] = asyncio.create_task(
+            process_media_group(group_id, user_id)
+        )
+
+        return
+
+    # --- 3. обычное ДЗ ---
     file_id = None
     file_type = None
 
@@ -260,6 +265,9 @@ async def handle_message(message: types.Message):
 async def accept(callback: types.CallbackQuery):
     homework_id = int(callback.data.split("_")[1])
 
+    # убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     # меняем статус
     db.update_status(homework_id, "accepted")
 
@@ -282,6 +290,9 @@ async def accept(callback: types.CallbackQuery):
 async def revise(callback: types.CallbackQuery):
     homework_id = int(callback.data.split("_")[1])
 
+    # убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     # сохраняем, что ждём комментарий от этого проверяющего
     review_state[callback.from_user.id] = homework_id
 
@@ -293,6 +304,9 @@ async def revise(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "confirm_send")
 async def confirm_send(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    # убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
 
     # достаём сохранённое ДЗ
     data = pending_homeworks.get(user_id)
@@ -376,6 +390,9 @@ async def confirm_send(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "cancel_send")
 async def cancel_send(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    # убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
 
     # удаляем из временного хранилища
     pending_homeworks.pop(user_id, None)
