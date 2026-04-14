@@ -108,33 +108,42 @@ async def process_review_media_group(group_id, user_id):
     files = []
     text = ""
 
-    # --- сначала собираем данные ---
+    # --- собираем данные ---
     for msg in messages:
         if msg.caption and not text:
             text = msg.caption
 
         if msg.photo:
-            files.append(msg.photo[-1].file_id)
-
+            files.append(("photo", msg.photo[-1].file_id))
         elif msg.document:
-            files.append(msg.document.file_id)
+            files.append(("document", msg.document.file_id))
 
     # --- обновляем БД ---
     db.update_status(homework_id, "revision")
     db.add_comment(homework_id, text)
 
-    caption = f"Нужно доработать:\n{text or ''}"
+    # --- формируем текст ---
+    caption = "Нужно доработать"
+    if text:
+        caption += f":\n{text}"
 
-    # --- отправляем файлы ---
-    if files:
-        media = [InputMediaPhoto(media=file_id) for file_id in files]
+    # сначала текст
+    await bot.send_message(student_id, caption)
+
+    # --- потом файлы ---
+    photos = [f for f in files if f[0] == "photo"]
+    docs = [f for f in files if f[0] == "document"]
+
+    # фото альбомом
+    if photos:
+        media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
         await bot.send_media_group(student_id, media)
 
-    # --- отправляем текст ---
-    if text:
-        await bot.send_message(student_id, caption)
+    # документы по одному
+    for _, file_id in docs:
+        await bot.send_document(student_id, file_id)
 
-    # --- отбивка валидатору ---
+    # --- ответ валидатору ---
     await bot.send_message(user_id, "Комментарий отправлен ученику ✏️")
 
     del review_state[user_id]
@@ -159,20 +168,26 @@ async def process_single_review(message, user_id):
         file_id = message.video.file_id
         file_type = "video"
 
+    # --- обновляем БД ---
     db.update_status(homework_id, "revision")
     db.add_comment(homework_id, text)
 
-    caption = f"Нужно доработать:\n{text or ''}"
+    # --- формируем текст ---
+    caption = "Нужно доработать"
+    if text:
+        caption += f":\n{text}"
 
+    # ВСЕГДА сначала текст
+    await bot.send_message(student_id, caption)
+
+    # --- потом файл (если есть) ---
     if file_id:
         if file_type == "photo":
-            await bot.send_photo(student_id, file_id, caption=caption)
+            await bot.send_photo(student_id, file_id)
         elif file_type == "video":
-            await bot.send_video(student_id, file_id, caption=caption)
+            await bot.send_video(student_id, file_id)
         else:
-            await bot.send_document(student_id, file_id, caption=caption)
-    else:
-        await bot.send_message(student_id, caption)
+            await bot.send_document(student_id, file_id)
 
     await message.answer("Комментарий отправлен ученику ✏️")
 
