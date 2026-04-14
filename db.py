@@ -6,6 +6,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
+print("DATABASE_URL:", os.getenv("DATABASE_URL"))
+
 
 def init_db():
     cursor.execute("""
