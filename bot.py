@@ -231,9 +231,11 @@ async def cancel_review(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
 
     pending_reviews.pop(user_id, None)
-    review_state.pop(user_id, None)
 
-    await callback.message.answer("Отправка отменена ❌")
+    await callback.message.answer(
+        "Отправка отменена ❌\n\nНапиши комментарий для доработки"
+    )
+
     await callback.answer()
 
 
