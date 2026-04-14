@@ -21,6 +21,7 @@ review_state = {}
 
 # Временное хранение ДЗ до подтверждения отправки
 pending_homeworks = {}
+pending_reviews = {}
 
 media_groups = defaultdict(list)
 media_tasks = {}
@@ -93,7 +94,46 @@ async def send_confirm(user_id, message):
 
     await message.answer("📤 Отправить домашнее задание?", reply_markup=keyboard)
 
-async def process_review_media_group(group_id, user_id):
+async def collect_review_single(message, user_id):
+    homework_id = review_state[user_id]
+
+    text = message.text or message.caption or ""
+
+    file = None
+
+    if message.document:
+        file = ("document", message.document.file_id)
+    elif message.photo:
+        file = ("photo", message.photo[-1].file_id)
+    elif message.video:
+        file = ("video", message.video.file_id)
+
+    # если уже есть данные — дополняем
+    review = pending_reviews.get(user_id, {"text": "", "files": []})
+
+    if text:
+        if review["text"]:
+            review["text"] += "\n" + text
+        else:
+            review["text"] = text
+
+    if file:
+        review["files"].append(file)
+
+    pending_reviews[user_id] = review
+
+    # кнопки
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_review"),
+            InlineKeyboardButton(text="➕ Добавить ещё", callback_data="add_review"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_review")
+        ]
+    ])
+
+    await message.answer("Отправить доработку?", reply_markup=keyboard)
+
+async def collect_review_media_group(group_id, user_id):
     await asyncio.sleep(0.8)
 
     messages = review_media_groups.pop(group_id, [])
@@ -102,96 +142,100 @@ async def process_review_media_group(group_id, user_id):
     if not messages:
         return
 
+    review = pending_reviews.get(user_id, {"text": "", "files": []})
+
+    for msg in messages:
+        if msg.caption:
+            if review["text"]:
+                review["text"] += "\n" + msg.caption
+            else:
+                review["text"] = msg.caption
+
+        if msg.photo:
+            review["files"].append(("photo", msg.photo[-1].file_id))
+        elif msg.document:
+            review["files"].append(("document", msg.document.file_id))
+
+    pending_reviews[user_id] = review
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_review"),
+            InlineKeyboardButton(text="➕ Добавить ещё", callback_data="add_review"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_review")
+        ]
+    ])
+
+    await bot.send_message(user_id, "Отправить доработку?", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data == "confirm_review")
+async def confirm_review(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    review = pending_reviews.get(user_id)
+
+    if not review:
+        await callback.answer("Нет данных")
+        return
+
     homework_id = review_state[user_id]
     student_id = db.get_student_id(homework_id)
 
-    files = []
-    text = ""
+    text = review.get("text", "")
+    files = review.get("files", [])
 
-    # --- собираем данные ---
-    for msg in messages:
-        if msg.caption and not text:
-            text = msg.caption
-
-        if msg.photo:
-            files.append(("photo", msg.photo[-1].file_id))
-        elif msg.document:
-            files.append(("document", msg.document.file_id))
-
-    # --- обновляем БД ---
+    # обновляем БД
     db.update_status(homework_id, "revision")
     db.add_comment(homework_id, text)
 
-    # --- формируем текст ---
+    # текст
     caption = "Нужно доработать"
     if text:
         caption += f":\n{text}"
 
-    # сначала текст
     await bot.send_message(student_id, caption)
 
-    # --- потом файлы ---
+    # файлы
     photos = [f for f in files if f[0] == "photo"]
     docs = [f for f in files if f[0] == "document"]
+    videos = [f for f in files if f[0] == "video"]
 
-    # фото альбомом
     if photos:
         media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
         await bot.send_media_group(student_id, media)
 
-    # документы по одному
     for _, file_id in docs:
         await bot.send_document(student_id, file_id)
 
-    # --- ответ валидатору ---
+    for _, file_id in videos:
+        await bot.send_video(student_id, file_id)
+
     await bot.send_message(user_id, "Комментарий отправлен ученику ✏️")
 
+    # очистка
+    pending_reviews.pop(user_id, None)
     del review_state[user_id]
 
+    await callback.answer()
 
-async def process_single_review(message, user_id):
-    homework_id = review_state[user_id]
-    student_id = db.get_student_id(homework_id)
+@dp.callback_query(lambda c: c.data == "add_review")
+async def add_review(callback: types.CallbackQuery):
+    await callback.answer("Можешь отправить ещё текст или файлы 👍")
 
-    text = message.text or message.caption or ""
+@dp.callback_query(lambda c: c.data == "cancel_review")
+async def cancel_review(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
 
-    file_id = None
-    file_type = None
+    await callback.message.edit_reply_markup(reply_markup=None)
 
-    if message.document:
-        file_id = message.document.file_id
-        file_type = "document"
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-        file_type = "photo"
-    elif message.video:
-        file_id = message.video.file_id
-        file_type = "video"
+    pending_reviews.pop(user_id, None)
+    review_state.pop(user_id, None)
 
-    # --- обновляем БД ---
-    db.update_status(homework_id, "revision")
-    db.add_comment(homework_id, text)
+    await callback.message.answer("Отправка отменена ❌")
+    await callback.answer()
 
-    # --- формируем текст ---
-    caption = "Нужно доработать"
-    if text:
-        caption += f":\n{text}"
-
-    # ВСЕГДА сначала текст
-    await bot.send_message(student_id, caption)
-
-    # --- потом файл (если есть) ---
-    if file_id:
-        if file_type == "photo":
-            await bot.send_photo(student_id, file_id)
-        elif file_type == "video":
-            await bot.send_video(student_id, file_id)
-        else:
-            await bot.send_document(student_id, file_id)
-
-    await message.answer("Комментарий отправлен ученику ✏️")
-
-    del review_state[user_id]
 
 # Основной обработчик сообщений (ученик + комментарии)
 @dp.message()
@@ -210,13 +254,12 @@ async def handle_message(message: types.Message):
                 review_media_tasks[group_id].cancel()
 
             review_media_tasks[group_id] = asyncio.create_task(
-                process_review_media_group(group_id, user_id)
+                collect_review_media_group(group_id, user_id)
             )
 
             return
 
-        # одиночный комментарий
-        await process_single_review(message, user_id)
+        await collect_review_single(message, user_id)
         return
 
     # --- 2. если альбом (ДЗ) ---
