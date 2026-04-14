@@ -1,75 +1,47 @@
-import sqlite3
+import psycopg2
+import os
 
-# Подключение к SQLite базе (файл создастся автоматически)
-conn = sqlite3.connect("bot.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 
 def init_db():
-    # Основная таблица ДЗ
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS homeworks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        student_id INTEGER,
+        id SERIAL PRIMARY KEY,
+        student_id BIGINT,
         status TEXT,
         current_version INTEGER DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
-    # Миграция: добавляем current_version, если база старая
-    try:
-        cursor.execute("ALTER TABLE homeworks ADD COLUMN current_version INTEGER DEFAULT 1")
-    except:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE homeworks ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    except:
-        pass
-
-    # Таблица версий ДЗ (каждое обновление = новая строка)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS versions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         homework_id INTEGER,
         text TEXT,
         comment TEXT,
         file_id TEXT,
+        file_type TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
-
-    # Миграции для новых колонок
-    try:
-        cursor.execute("ALTER TABLE versions ADD COLUMN file_id TEXT")
-    except:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE versions ADD COLUMN file_type TEXT")
-    except:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE versions ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-    except:
-        pass
 
     conn.commit()
 
 
 def create_homework(student_id, text=None, file_id=None, file_type=None):
-    # Создание нового ДЗ
     cursor.execute(
-        "INSERT INTO homeworks (student_id, status) VALUES (?, ?)",
+        "INSERT INTO homeworks (student_id, status) VALUES (%s, %s) RETURNING id",
         (student_id, "new")
     )
-    homework_id = cursor.lastrowid
+    homework_id = cursor.fetchone()[0]
 
-    # Первая версия ДЗ
     cursor.execute(
-        "INSERT INTO versions (homework_id, text, file_id, file_type) VALUES (?, ?, ?, ?)",
+        "INSERT INTO versions (homework_id, text, file_id, file_type) VALUES (%s, %s, %s, %s)",
         (homework_id, text, file_id, file_type)
     )
 
@@ -78,22 +50,20 @@ def create_homework(student_id, text=None, file_id=None, file_type=None):
 
 
 def update_status(homework_id, status):
-    # Обновление статуса ДЗ (new / revision / accepted)
     cursor.execute(
-        "UPDATE homeworks SET status=? WHERE id=?",
+        "UPDATE homeworks SET status=%s WHERE id=%s",
         (status, homework_id)
     )
     conn.commit()
 
 
 def add_comment(homework_id, comment):
-    # Добавление комментария к последней версии дз
     cursor.execute("""
     UPDATE versions
-    SET comment=?
+    SET comment=%s
     WHERE id = (
         SELECT id FROM versions
-        WHERE homework_id=?
+        WHERE homework_id=%s
         ORDER BY id DESC
         LIMIT 1
     )
@@ -103,19 +73,20 @@ def add_comment(homework_id, comment):
 
 
 def get_student_id(homework_id):
-    # Получаем ID ученика по ДЗ
     cursor.execute(
-        "SELECT student_id FROM homeworks WHERE id=?",
+        "SELECT student_id FROM homeworks WHERE id=%s",
         (homework_id,)
     )
-    return cursor.fetchone()[0]
+    result = cursor.fetchone()
+    return result[0] if result else None
 
 
 def get_active_homework(student_id):
     cursor.execute("""
     SELECT id FROM homeworks
-    WHERE student_id=? AND status IN ('revision', 'new')
-    ORDER BY id DESC LIMIT 1
+    WHERE student_id=%s AND status IN ('revision', 'new')
+    ORDER BY id DESC
+    LIMIT 1
     """, (student_id,))
 
     result = cursor.fetchone()
@@ -123,38 +94,36 @@ def get_active_homework(student_id):
 
 
 def add_version(homework_id, text=None, file_id=None, file_type=None):
-    # Получаем текущую версию и увеличиваем её
-    cursor.execute("""
-    SELECT current_version FROM homeworks WHERE id=?
-    """, (homework_id,))
-
+    cursor.execute(
+        "SELECT current_version FROM homeworks WHERE id=%s",
+        (homework_id,)
+    )
     version = cursor.fetchone()[0] + 1
 
-    # Обновляем номер версии
-    cursor.execute("""
-    UPDATE homeworks SET current_version=? WHERE id=?
-    """, (version, homework_id))
+    cursor.execute(
+        "UPDATE homeworks SET current_version=%s WHERE id=%s",
+        (version, homework_id)
+    )
 
-    # Добавляем новую версию ДЗ
     cursor.execute("""
     INSERT INTO versions (homework_id, text, file_id, file_type)
-    VALUES (?, ?, ?, ?)
+    VALUES (%s, %s, %s, %s)
     """, (homework_id, text, file_id, file_type))
 
     conn.commit()
 
 
 def get_current_version(homework_id):
-    # Получить текущий номер версии ДЗ
-    cursor.execute("""
-    SELECT current_version FROM homeworks WHERE id=?
-    """, (homework_id,))
-
+    cursor.execute(
+        "SELECT current_version FROM homeworks WHERE id=%s",
+        (homework_id,)
+    )
     return cursor.fetchone()[0]
+
 
 def get_homework_status(homework_id):
     cursor.execute(
-        "SELECT status FROM homeworks WHERE id=?",
+        "SELECT status FROM homeworks WHERE id=%s",
         (homework_id,)
     )
     return cursor.fetchone()[0]
