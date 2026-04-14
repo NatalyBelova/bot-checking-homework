@@ -360,7 +360,6 @@ async def revise(callback: types.CallbackQuery):
     await callback.answer()
 
 
-
 # Подтверждение отправки ДЗ
 @dp.callback_query(lambda c: c.data == "confirm_send")
 async def confirm_send(callback: types.CallbackQuery):
