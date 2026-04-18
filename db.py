@@ -129,3 +129,13 @@ def get_homework_status(homework_id):
         (homework_id,)
     )
     return cursor.fetchone()[0]
+
+def get_homeworks_by_student(student_id):
+    cursor.execute("""
+    SELECT id, status, created_at
+    FROM homeworks
+    WHERE student_id=%s
+    ORDER BY id DESC
+    """, (student_id,))
+
+    return cursor.fetchall()

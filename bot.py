@@ -29,11 +29,24 @@ media_tasks = {}
 review_media_groups = defaultdict(list)
 review_media_tasks = {}
 
+waiting_for_homework = set()
+
 
 # Команда /start
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("Отправь домашнее задание")
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="📤 Отправить новое ДЗ")],
+            [types.KeyboardButton(text="📋 Мои ДЗ")]
+        ],
+        resize_keyboard=True
+    )
+
+    await message.answer(
+        "Выбери действие 👇",
+        reply_markup=keyboard
+    )
 
 async def process_media_group(group_id, user_id):
     await asyncio.sleep(0.8)  # ждем все сообщения альбома
@@ -244,6 +257,18 @@ async def cancel_review(callback: types.CallbackQuery):
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
 
+    # новое ДЗ
+    if message.text == "📤 Отправить новое ДЗ":
+        waiting_for_homework.add(user_id)
+        await message.answer("Отправь домашнее задание 📚")
+        return
+
+    # блокируем всё остальное
+    if user_id not in waiting_for_homework and user_id not in review_state:
+        if message.text:
+            await message.answer("Нажми '📤 Отправить новое ДЗ', чтобы начать 👇")
+        return
+
     # --- 1. комментарий от валидатора ---
     if user_id in review_state:
 
@@ -295,13 +320,6 @@ async def handle_message(message: types.Message):
 
     text = message.text or message.caption or ""
 
-    existing_hw = db.get_active_homework(user_id)
-
-    is_revision = False
-    if existing_hw:
-        status = db.get_homework_status(existing_hw)
-        is_revision = (status == "revision")
-
     pending_homeworks[user_id] = {
         "text": text,
         "file_id": file_id,
@@ -315,9 +333,7 @@ async def handle_message(message: types.Message):
         ]
     ])
 
-    question = "🔄 Отправить доработку?" if is_revision else "📤 Отправить домашнее задание?"
-
-    await message.answer(question, reply_markup=keyboard)
+    await message.answer("📤 Отправить домашнее задание?", reply_markup=keyboard)
 
 
 # Принять ДЗ
@@ -337,7 +353,10 @@ async def accept(callback: types.CallbackQuery):
     # 🔥 чистим pending
     pending_homeworks.pop(student_id, None)
 
-    await bot.send_message(student_id, "ДЗ принято ✅")
+    await bot.send_message(
+        student_id,
+        f"ДЗ #{homework_id} принято ✅"
+    )
 
     # сообщение валидатору в чат
     await callback.message.answer("ДЗ принято ✅")
@@ -377,18 +396,15 @@ async def confirm_send(callback: types.CallbackQuery):
 
     text = data.get("text", "")
 
-    # --- логика создания/обновления ДЗ ---
-    existing_hw = db.get_active_homework(user_id)
+    # ВСЕГДА создаём новое ДЗ
+    homework_id = db.create_homework(
+        user_id,
+        text,
+        None,
+        data.get("file_type")
+    )
 
-    if existing_hw:
-        homework_id = existing_hw
-        db.add_version(homework_id, text, None, data.get("file_type"))
-        db.update_status(homework_id, "new")
-        title = f"ДЗ #{homework_id} (доработка)"
-    else:
-        homework_id = db.create_homework(user_id, text, None, data.get("file_type"))
-        title = f"Новое ДЗ #{homework_id}"
-
+    title = f"Новое ДЗ #{homework_id}"
     caption = f"{title}\n{text or ''}"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -440,10 +456,15 @@ async def confirm_send(callback: types.CallbackQuery):
             else:
                 await bot.send_message(reviewer, caption, reply_markup=keyboard)
 
-    await callback.message.answer("ДЗ отправлено на проверку ✅")
+    await callback.message.answer(
+        f"ДЗ #{homework_id} отправлено на проверку ✅\n\n"
+        f"Можешь отправить ещё одно 👇"
+    )
     await callback.answer()
 
     pending_homeworks.pop(user_id, None)
+
+    waiting_for_homework.discard(user_id)
 
 
 # Отмена отправки
@@ -459,6 +480,33 @@ async def cancel_send(callback: types.CallbackQuery):
 
     await callback.message.answer("Отправка отменена ❌")
     await callback.answer()
+
+
+@dp.message(lambda message: message.text == "📋 Мои ДЗ")
+async def my_homeworks(message: types.Message):
+    user_id = message.from_user.id
+
+    homeworks = db.get_homeworks_by_student(user_id)
+
+    if not homeworks:
+        await message.answer("У тебя пока нет отправленных ДЗ 📭")
+        return
+
+    status_map = {
+        "new": "🆕 Новое",
+        "revision": "🔄 На доработке",
+        "accepted": "✅ Принято"
+    }
+
+    text = "📋 Твои домашние задания:\n\n"
+
+    for hw_id, status, created_at in homeworks:
+        pretty_status = status_map.get(status, status)
+        date = created_at.strftime("%d.%m")
+
+        text += f"📌 ДЗ #{hw_id} — {pretty_status} ({date})\n"
+
+    await message.answer(text)
 
 
 # Запуск бота
