@@ -263,8 +263,12 @@ async def handle_message(message: types.Message):
         await message.answer("Отправь домашнее задание 📚")
         return
 
-    # блокируем всё остальное
-    if user_id not in waiting_for_homework and user_id not in review_state:
+    # блокируем всё, кроме разрешённых действий
+    if (
+        user_id not in waiting_for_homework
+        and user_id not in review_state
+        and message.text != "📋 Мои ДЗ"
+    ):
         if message.text:
             await message.answer("Нажми '📤 Отправить новое ДЗ', чтобы начать 👇")
         return
