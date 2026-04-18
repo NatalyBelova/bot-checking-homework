@@ -257,6 +257,31 @@ async def cancel_review(callback: types.CallbackQuery):
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
 
+    # 📋 мои ДЗ
+    if message.text == "📋 Мои ДЗ":
+        homeworks = db.get_homeworks_by_student(user_id)
+
+        if not homeworks:
+            await message.answer("У тебя пока нет отправленных ДЗ 📭")
+            return
+
+        status_map = {
+            "new": "🆕 Новое",
+            "revision": "🔄 На доработке",
+            "accepted": "✅ Принято"
+        }
+
+        text = "📋 Твои домашние задания:\n\n"
+
+        for hw_id, status, created_at in homeworks:
+            pretty_status = status_map.get(status, status)
+            date = created_at.strftime("%d.%m")
+
+            text += f"📌 ДЗ #{hw_id} — {pretty_status} ({date})\n"
+
+        await message.answer(text)
+        return
+
     # новое ДЗ
     if message.text == "📤 Отправить новое ДЗ":
         waiting_for_homework.add(user_id)
@@ -484,33 +509,6 @@ async def cancel_send(callback: types.CallbackQuery):
 
     await callback.message.answer("Отправка отменена ❌")
     await callback.answer()
-
-
-@dp.message(lambda message: message.text == "📋 Мои ДЗ")
-async def my_homeworks(message: types.Message):
-    user_id = message.from_user.id
-
-    homeworks = db.get_homeworks_by_student(user_id)
-
-    if not homeworks:
-        await message.answer("У тебя пока нет отправленных ДЗ 📭")
-        return
-
-    status_map = {
-        "new": "🆕 Новое",
-        "revision": "🔄 На доработке",
-        "accepted": "✅ Принято"
-    }
-
-    text = "📋 Твои домашние задания:\n\n"
-
-    for hw_id, status, created_at in homeworks:
-        pretty_status = status_map.get(status, status)
-        date = created_at.strftime("%d.%m")
-
-        text += f"📌 ДЗ #{hw_id} — {pretty_status} ({date})\n"
-
-    await message.answer(text)
 
 
 # Запуск бота
