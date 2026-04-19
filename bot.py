@@ -373,14 +373,16 @@ async def handle_message(message: types.Message):
         db.add_version(homework_id, text, file_id, file_type)
         db.update_status(homework_id, "new")
 
-        # --- отправляем валидатору ---
-        for reviewer in REVIEWERS:
+        # --- кнопки ---
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+                InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")
+            ]
+        ])
 
-            if text:
-                await bot.send_message(
-                    reviewer,
-                    f"Доработка по ДЗ #{homework_id}:\n{text}"
-                )
+        # --- отправка валидатору ---
+        for reviewer in REVIEWERS:
 
             if file_id:
                 if file_type == "photo":
@@ -390,10 +392,16 @@ async def handle_message(message: types.Message):
                 else:
                     await bot.send_document(reviewer, file_id)
 
-        # --- уведомляем ученика ---
+            await bot.send_message(
+                reviewer,
+                f"Доработка по ДЗ #{homework_id}:\n{text}",
+                reply_markup=keyboard
+            )
+
+        # --- уведомление ученика ---
         await message.answer(f"Доработка для ДЗ #{homework_id} отправлена ✅")
 
-        # --- очищаем состояние ---
+        # --- очистка ---
         student_revision_state.pop(user_id, None)
         return
 
@@ -590,14 +598,16 @@ async def process_student_media_group(group_id, user_id):
 
     db.update_status(homework_id, "new")
 
+    # --- кнопки для валидатора ---
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+            InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")
+        ]
+    ])
+
     # --- отправка валидатору ---
     for reviewer in REVIEWERS:
-
-        if text:
-            await bot.send_message(
-                reviewer,
-                f"Доработка по ДЗ #{homework_id}:\n{text}"
-            )
 
         photos = [f for f in files if f[0] == "photo"]
         docs = [f for f in files if f[0] == "document"]
@@ -613,13 +623,20 @@ async def process_student_media_group(group_id, user_id):
         for _, file_id in videos:
             await bot.send_video(reviewer, file_id)
 
+        # текст + кнопки (ВАЖНО: отдельно)
+        await bot.send_message(
+            reviewer,
+            f"Доработка по ДЗ #{homework_id}:\n{text}",
+            reply_markup=keyboard
+        )
+
     # --- уведомление ученика ---
     await bot.send_message(
         user_id,
         f"Доработка для ДЗ #{homework_id} отправлена ✅"
     )
 
-    # --- очистка состояния ---
+    # --- очистка ---
     student_revision_state.pop(user_id, None)
 
 
