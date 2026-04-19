@@ -32,6 +32,9 @@ review_media_tasks = {}
 waiting_for_homework = set()
 student_revision_state = {}
 
+student_media_groups = defaultdict(list)
+student_media_tasks = {}
+
 
 # Команда /start
 @dp.message(Command("start"))
@@ -326,13 +329,13 @@ async def handle_message(message: types.Message):
 
         # доработка
         if user_id in student_revision_state:
-            review_media_groups[group_id].append(message)
+            student_media_groups[group_id].append(message)
 
-            if group_id in review_media_tasks:
-                review_media_tasks[group_id].cancel()
+            if group_id in student_media_tasks:
+                student_media_tasks[group_id].cancel()
 
-            review_media_tasks[group_id] = asyncio.create_task(
-                collect_review_media_group(group_id, user_id)
+            student_media_tasks[group_id] = asyncio.create_task(
+                process_student_media_group(group_id, user_id)
             )
             return
 
@@ -535,6 +538,44 @@ async def confirm_send(callback: types.CallbackQuery):
     pending_homeworks.pop(user_id, None)
 
     waiting_for_homework.discard(user_id)
+
+async def process_student_media_group(group_id, user_id):
+    await asyncio.sleep(0.8)
+
+    messages = student_media_groups.pop(group_id, [])
+    student_media_tasks.pop(group_id, None)
+
+    if not messages:
+        return
+
+    homework_id = student_revision_state[user_id]
+
+    text = ""
+    files = []
+
+    for msg in messages:
+        if msg.caption and not text:
+            text = msg.caption
+
+        if msg.photo:
+            files.append(("photo", msg.photo[-1].file_id))
+        elif msg.document:
+            files.append(("document", msg.document.file_id))
+        elif msg.video:
+            files.append(("video", msg.video.file_id))
+
+    # сохраняем ВСЕ файлы
+    for file_type, file_id in files:
+        db.add_version(homework_id, text, file_id, file_type)
+
+    db.update_status(homework_id, "new")
+
+    await bot.send_message(
+        user_id,
+        f"Доработка для ДЗ #{homework_id} отправлена ✅"
+    )
+
+    student_revision_state.pop(user_id, None)
 
 
 # Отмена отправки
