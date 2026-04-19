@@ -30,6 +30,7 @@ review_media_groups = defaultdict(list)
 review_media_tasks = {}
 
 waiting_for_homework = set()
+student_revision_state = {}
 
 
 # Команда /start
@@ -196,6 +197,8 @@ async def confirm_review(callback: types.CallbackQuery):
     homework_id = review_state[user_id]
     student_id = db.get_student_id(homework_id)
 
+    student_revision_state[student_id] = homework_id
+
     text = review.get("text", "")
     files = review.get("files", [])
 
@@ -292,7 +295,7 @@ async def handle_message(message: types.Message):
     if (
         user_id not in waiting_for_homework
         and user_id not in review_state
-        and message.text != "📋 Мои ДЗ"
+        and user_id not in student_revision_state
     ):
         if message.text:
             await message.answer("Нажми '📤 Отправить новое ДЗ', чтобы начать 👇")
@@ -312,16 +315,28 @@ async def handle_message(message: types.Message):
             review_media_tasks[group_id] = asyncio.create_task(
                 collect_review_media_group(group_id, user_id)
             )
-
             return
 
         await collect_review_single(message, user_id)
         return
 
-    # --- 2. если альбом (ДЗ) ---
+    # --- 2. альбом (ДЗ или доработка) ---
     if message.media_group_id:
         group_id = message.media_group_id
 
+        # доработка
+        if user_id in student_revision_state:
+            review_media_groups[group_id].append(message)
+
+            if group_id in review_media_tasks:
+                review_media_tasks[group_id].cancel()
+
+            review_media_tasks[group_id] = asyncio.create_task(
+                collect_review_media_group(group_id, user_id)
+            )
+            return
+
+        # 📤 новое ДЗ
         media_groups[group_id].append(message)
 
         if group_id in media_tasks:
@@ -330,10 +345,36 @@ async def handle_message(message: types.Message):
         media_tasks[group_id] = asyncio.create_task(
             process_media_group(group_id, user_id)
         )
-
         return
 
-    # --- 3. обычное ДЗ ---
+    # --- 3. доработка (одиночное сообщение) ---
+    if user_id in student_revision_state:
+        homework_id = student_revision_state[user_id]
+
+        file_id = None
+        file_type = None
+
+        if message.document:
+            file_id = message.document.file_id
+            file_type = "document"
+        elif message.photo:
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif message.video:
+            file_id = message.video.file_id
+            file_type = "video"
+
+        text = message.text or message.caption or ""
+
+        db.add_version(homework_id, text, file_id, file_type)
+        db.update_status(homework_id, "new")
+
+        await message.answer(f"Доработка для ДЗ #{homework_id} отправлена ✅")
+
+        student_revision_state.pop(user_id, None)
+        return
+
+    # --- 4. обычное ДЗ (одиночное) ---
     file_id = None
     file_type = None
 
