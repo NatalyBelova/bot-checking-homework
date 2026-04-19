@@ -369,11 +369,31 @@ async def handle_message(message: types.Message):
 
         text = message.text or message.caption or ""
 
+        # --- сохраняем ---
         db.add_version(homework_id, text, file_id, file_type)
         db.update_status(homework_id, "new")
 
+        # --- отправляем валидатору ---
+        for reviewer in REVIEWERS:
+
+            if text:
+                await bot.send_message(
+                    reviewer,
+                    f"Доработка по ДЗ #{homework_id}:\n{text}"
+                )
+
+            if file_id:
+                if file_type == "photo":
+                    await bot.send_photo(reviewer, file_id)
+                elif file_type == "video":
+                    await bot.send_video(reviewer, file_id)
+                else:
+                    await bot.send_document(reviewer, file_id)
+
+        # --- уведомляем ученика ---
         await message.answer(f"Доработка для ДЗ #{homework_id} отправлена ✅")
 
+        # --- очищаем состояние ---
         student_revision_state.pop(user_id, None)
         return
 
@@ -564,17 +584,42 @@ async def process_student_media_group(group_id, user_id):
         elif msg.video:
             files.append(("video", msg.video.file_id))
 
-    # сохраняем ВСЕ файлы
+    # --- сохраняем в БД ---
     for file_type, file_id in files:
         db.add_version(homework_id, text, file_id, file_type)
 
     db.update_status(homework_id, "new")
 
+    # --- отправка валидатору ---
+    for reviewer in REVIEWERS:
+
+        if text:
+            await bot.send_message(
+                reviewer,
+                f"Доработка по ДЗ #{homework_id}:\n{text}"
+            )
+
+        photos = [f for f in files if f[0] == "photo"]
+        docs = [f for f in files if f[0] == "document"]
+        videos = [f for f in files if f[0] == "video"]
+
+        if photos:
+            media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
+            await bot.send_media_group(reviewer, media)
+
+        for _, file_id in docs:
+            await bot.send_document(reviewer, file_id)
+
+        for _, file_id in videos:
+            await bot.send_video(reviewer, file_id)
+
+    # --- уведомление ученика ---
     await bot.send_message(
         user_id,
         f"Доработка для ДЗ #{homework_id} отправлена ✅"
     )
 
+    # --- очистка состояния ---
     student_revision_state.pop(user_id, None)
 
 
