@@ -301,6 +301,11 @@ async def handle_message(message: types.Message):
 
     # новое ДЗ
     if message.text == "📤 Отправить новое ДЗ":
+
+        if user_id in REVIEWERS:
+            await message.answer("Ты не можешь отправлять ДЗ ❌")
+            return
+
         waiting_for_homework.add(user_id)
         await message.answer("Отправь домашнее задание 📚")
         return
