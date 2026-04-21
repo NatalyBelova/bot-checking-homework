@@ -5,7 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from config import TOKEN, REVIEWERS
 from collections import defaultdict
-from aiogram.types import InputMediaPhoto
+from aiogram.types import InputMediaPhoto, ReplyKeyboardRemove
 
 
 
@@ -39,6 +39,15 @@ student_media_tasks = {}
 # Команда /start
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    user_id = message.from_user.id
+
+    if user_id in REVIEWERS:
+        await message.answer(
+            "Ты в режиме проверки ДЗ ✏️",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="📤 Отправить новое ДЗ")],
@@ -210,7 +219,8 @@ async def confirm_review(callback: types.CallbackQuery):
     db.add_comment(homework_id, text)
 
     # текст
-    caption = "Нужно доработать"
+    caption = "🔄 Нужно доработать\n\nОтветь на это сообщение с исправлениями (текстом или файлом)"
+
     if text:
         caption += f":\n{text}"
 
@@ -302,7 +312,7 @@ async def handle_message(message: types.Message):
         and user_id not in student_revision_state
     ):
         if message.text:
-            await message.answer("Нажми '📤 Отправить новое ДЗ', чтобы начать 👇")
+            await message.answer("Нажми кнопку '📤 Отправить новое ДЗ', чтобы начать 👇")
         return
 
     # --- 1. комментарий от валидатора ---
