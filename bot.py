@@ -312,12 +312,15 @@ async def handle_message(message: types.Message):
 
     # блокируем всё, кроме разрешённых действий
     if (
-        user_id not in waiting_for_homework
-        and user_id not in review_state
-        and user_id not in student_revision_state
+            user_id not in waiting_for_homework
+            and user_id not in review_state
+            and user_id not in student_revision_state
     ):
         if message.text:
-            await message.answer("Нажми кнопку '📤 Отправить новое ДЗ', чтобы начать 👇")
+            if user_id in REVIEWERS:
+                await message.answer("Ожидай новое ДЗ от ученика ✏️")
+            else:
+                await message.answer("Нажми кнопку '📤 Отправить новое ДЗ', чтобы начать 👇")
         return
 
     # --- 1. комментарий от валидатора ---
