@@ -241,7 +241,8 @@ async def confirm_review(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "add_review")
 async def add_review(callback: types.CallbackQuery):
-    await callback.answer("Можешь отправить ещё текст или файлы 👍")
+    await callback.message.answer("Можешь отправить ещё текст или файлы 👍")
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "cancel_review")
 async def cancel_review(callback: types.CallbackQuery):
@@ -392,9 +393,11 @@ async def handle_message(message: types.Message):
                 else:
                     await bot.send_document(reviewer, file_id)
 
+            user_display = get_user_display(message.from_user)
+
             await bot.send_message(
                 reviewer,
-                f"Доработка по ДЗ #{homework_id}:\n{text}",
+                f"Доработка по ДЗ #{homework_id} от {user_display}:\n{text}",
                 reply_markup=keyboard
             )
 
@@ -505,7 +508,9 @@ async def confirm_send(callback: types.CallbackQuery):
         data.get("file_type")
     )
 
-    title = f"Новое ДЗ #{homework_id}"
+    user_display = get_user_display(callback.from_user)
+
+    title = f"Новое ДЗ #{homework_id} от {user_display}"
     caption = f"{title}\n{text or ''}"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -624,9 +629,12 @@ async def process_student_media_group(group_id, user_id):
             await bot.send_video(reviewer, file_id)
 
         # текст + кнопки (ВАЖНО: отдельно)
+        user = messages[0].from_user if messages else None
+        user_display = get_user_display(user) if user else "unknown"
+
         await bot.send_message(
             reviewer,
-            f"Доработка по ДЗ #{homework_id}:\n{text}",
+            f"Доработка по ДЗ #{homework_id} от {user_display}:\n{text}",
             reply_markup=keyboard
         )
 
@@ -653,6 +661,13 @@ async def cancel_send(callback: types.CallbackQuery):
 
     await callback.message.answer("Отправка отменена ❌")
     await callback.answer()
+
+def get_user_display(user: types.User):
+    if user.username:
+        return f"@{user.username}"
+    if user.full_name:
+        return user.full_name
+    return f"id:{user.id}"
 
 
 # Запуск бота
