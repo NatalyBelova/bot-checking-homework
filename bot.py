@@ -241,7 +241,7 @@ async def confirm_review(callback: types.CallbackQuery):
     for _, file_id in videos:
         await bot.send_video(student_id, file_id)
 
-    await bot.send_message(user_id, "Комментарий отправлен ученику ✏️")
+    await bot.send_message(user_id, f"Комментарий по ДЗ #{homework_id} отправлен ученику ✏️")
 
     # очистка
     pending_reviews.pop(user_id, None)
@@ -257,13 +257,14 @@ async def add_review(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "cancel_review")
 async def cancel_review(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    homework_id = review_state.get(user_id)
 
     await callback.message.edit_reply_markup(reply_markup=None)
 
     pending_reviews.pop(user_id, None)
 
     await callback.message.answer(
-        "Отправка отменена ❌\n\nНапиши комментарий для доработки"
+        f"Отправка отменена ❌\n\nНапиши комментарий для доработки по ДЗ #{homework_id}"
     )
 
     await callback.answer()
@@ -497,7 +498,7 @@ async def revise(callback: types.CallbackQuery):
     # сохраняем, что ждём комментарий от этого проверяющего
     review_state[callback.from_user.id] = homework_id
 
-    await callback.message.answer("Напиши комментарий для доработки")
+    await callback.message.answer(f"Напиши комментарий для доработки по ДЗ #{homework_id}")
     await callback.answer()
 
 
