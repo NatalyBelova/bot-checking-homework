@@ -121,7 +121,7 @@ async def send_confirm(user_id, message):
     await message.answer("📤 Отправить домашнее задание?", reply_markup=keyboard)
 
 async def collect_review_single(message, user_id):
-    homework_id = review_state[user_id]
+    action = review_state[user_id]["action"]
 
     text = message.text or message.caption or ""
 
@@ -157,7 +157,8 @@ async def collect_review_single(message, user_id):
         ]
     ])
 
-    await message.answer("Отправить доработку?", reply_markup=keyboard)
+    prompt = "Отправить принятие ДЗ?" if action == "accept" else "Отправить доработку?"
+    await message.answer(prompt, reply_markup=keyboard)
 
 async def collect_review_media_group(group_id, user_id):
     await asyncio.sleep(0.8)
@@ -167,6 +168,8 @@ async def collect_review_media_group(group_id, user_id):
 
     if not messages:
         return
+
+    action = review_state[user_id]["action"]
 
     review = pending_reviews.get(user_id, {"text": "", "files": []})
 
@@ -192,7 +195,23 @@ async def collect_review_media_group(group_id, user_id):
         ]
     ])
 
-    await bot.send_message(user_id, "Отправить доработку?", reply_markup=keyboard)
+    prompt = "Отправить принятие ДЗ?" if action == "accept" else "Отправить доработку?"
+    await bot.send_message(user_id, prompt, reply_markup=keyboard)
+
+async def send_review_files(chat_id, files):
+    photos = [f for f in files if f[0] == "photo"]
+    docs = [f for f in files if f[0] == "document"]
+    videos = [f for f in files if f[0] == "video"]
+
+    if photos:
+        media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
+        await bot.send_media_group(chat_id, media)
+
+    for _, file_id in docs:
+        await bot.send_document(chat_id, file_id)
+
+    for _, file_id in videos:
+        await bot.send_video(chat_id, file_id)
 
 @dp.callback_query(lambda c: c.data == "confirm_review")
 async def confirm_review(callback: types.CallbackQuery):
@@ -206,42 +225,51 @@ async def confirm_review(callback: types.CallbackQuery):
         await callback.answer("Нет данных")
         return
 
-    homework_id = review_state[user_id]
+    state = review_state[user_id]
+    homework_id = state["homework_id"]
+    action = state["action"]
     student_id = db.get_student_id(homework_id)
-
-    student_revision_state[student_id] = homework_id
 
     text = review.get("text", "")
     files = review.get("files", [])
 
-    # обновляем БД
-    db.update_status(homework_id, "revision")
-    db.add_comment(homework_id, text)
+    if action == "accept":
+        # обновляем БД
+        db.update_status(homework_id, "accepted")
 
-    # текст
-    caption = "🔄 Нужно доработать\n\nОтветь на это сообщение с исправлениями (текстом или файлом)"
+        if text:
+            db.add_comment(homework_id, text)
 
-    if text:
-        caption += f":\n{text}"
+        # 🔥 чистим pending
+        pending_homeworks.pop(student_id, None)
 
-    await bot.send_message(student_id, caption)
+        # текст
+        caption = "✅ ДЗ принято!"
 
-    # файлы
-    photos = [f for f in files if f[0] == "photo"]
-    docs = [f for f in files if f[0] == "document"]
-    videos = [f for f in files if f[0] == "video"]
+        if text:
+            caption += f"\n\n{text}"
 
-    if photos:
-        media = [InputMediaPhoto(media=file_id) for _, file_id in photos]
-        await bot.send_media_group(student_id, media)
+        await bot.send_message(student_id, caption)
+        await send_review_files(student_id, files)
 
-    for _, file_id in docs:
-        await bot.send_document(student_id, file_id)
+        await bot.send_message(user_id, f"ДЗ #{homework_id} принято ✅")
+    else:
+        student_revision_state[student_id] = homework_id
 
-    for _, file_id in videos:
-        await bot.send_video(student_id, file_id)
+        # обновляем БД
+        db.update_status(homework_id, "revision")
+        db.add_comment(homework_id, text)
 
-    await bot.send_message(user_id, f"Комментарий по ДЗ #{homework_id} отправлен ученику ✏️")
+        # текст
+        caption = "🔄 Нужно доработать\n\nОтветь на это сообщение с исправлениями (текстом или файлом)"
+
+        if text:
+            caption += f":\n{text}"
+
+        await bot.send_message(student_id, caption)
+        await send_review_files(student_id, files)
+
+        await bot.send_message(user_id, f"Комментарий по ДЗ #{homework_id} отправлен ученику ✏️")
 
     # очистка
     pending_reviews.pop(user_id, None)
@@ -257,15 +285,20 @@ async def add_review(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "cancel_review")
 async def cancel_review(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    homework_id = review_state.get(user_id)
+    state = review_state.get(user_id, {})
+    homework_id = state.get("homework_id")
+    action = state.get("action")
 
     await callback.message.edit_reply_markup(reply_markup=None)
 
     pending_reviews.pop(user_id, None)
 
-    await callback.message.answer(
-        f"Отправка отменена ❌\n\nНапиши комментарий для доработки по ДЗ #{homework_id}"
-    )
+    if action == "accept":
+        prompt = f"Напиши комментарий к принятому ДЗ #{homework_id}"
+    else:
+        prompt = f"Напиши комментарий для доработки по ДЗ #{homework_id}"
+
+    await callback.message.answer(f"Отправка отменена ❌\n\n{prompt}")
 
     await callback.answer()
 
@@ -397,6 +430,9 @@ async def handle_message(message: types.Message):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+                InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}")
+            ],
+            [
                 InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")
             ]
         ])
@@ -496,9 +532,24 @@ async def revise(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
 
     # сохраняем, что ждём комментарий от этого проверяющего
-    review_state[callback.from_user.id] = homework_id
+    review_state[callback.from_user.id] = {"homework_id": homework_id, "action": "revise"}
 
     await callback.message.answer(f"Напиши комментарий для доработки по ДЗ #{homework_id}")
+    await callback.answer()
+
+
+# Принять ДЗ с комментарием
+@dp.callback_query(lambda c: c.data.startswith("commentaccept_"))
+async def accept_with_comment(callback: types.CallbackQuery):
+    homework_id = int(callback.data.split("_")[1])
+
+    # убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    # сохраняем, что ждём комментарий от этого проверяющего
+    review_state[callback.from_user.id] = {"homework_id": homework_id, "action": "accept"}
+
+    await callback.message.answer(f"Напиши комментарий к принятому ДЗ #{homework_id}")
     await callback.answer()
 
 
@@ -535,6 +586,9 @@ async def confirm_send(callback: types.CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}")
+        ],
+        [
             InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")
         ]
     ])
@@ -626,6 +680,9 @@ async def process_student_media_group(group_id, user_id):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}")
+        ],
+        [
             InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")
         ]
     ])
