@@ -1,2 +1,3 @@
 bot.db
-.env
+.env__pycache__/
+*.pyc
