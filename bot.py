@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 import db
-from config import REVIEWERS, TOKEN
+from config import DEV_MODE, REVIEWERS, TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("homework_bot")
@@ -42,6 +42,7 @@ _albums = defaultdict(list)
 _album_tasks = {}
 _idle_albums = set()
 _user_locks = defaultdict(asyncio.Lock)
+_acting_as_student = set()  # DEV_MODE: проверяющие, переключившиеся в роль ученика
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ _user_locks = defaultdict(asyncio.Lock)
 # ---------------------------------------------------------------------------
 
 def is_reviewer(user_id):
-    return user_id in REVIEWERS
+    return user_id in REVIEWERS and user_id not in _acting_as_student
 
 
 def get_user_display(user: types.User):
@@ -209,11 +210,33 @@ async def start(message: types.Message):
             "Ты в режиме проверки ДЗ ✏️\n\n"
             "/tasks — список заданий\n"
             "/addtask Название — добавить задание\n"
-            "/cancel — сбросить текущее действие",
+            "/cancel — сбросить текущее действие"
+            + ("\n/switch — стать учеником (тестовый режим)" if DEV_MODE else ""),
             reply_markup=ReplyKeyboardRemove(),
         )
         return
     await message.answer("Выбери действие 👇", reply_markup=student_keyboard())
+
+
+@dp.message(Command("switch"))
+async def switch_role(message: types.Message):
+    """Только для тестов: проверяющий переключается между ролями."""
+    user_id = message.from_user.id
+    if not DEV_MODE or user_id not in REVIEWERS:
+        await handle_message(message)
+        return
+
+    await db.clear_state(user_id)
+    if user_id in _acting_as_student:
+        _acting_as_student.discard(user_id)
+        await message.answer("🔁 Теперь ты проверяющий", reply_markup=ReplyKeyboardRemove())
+    else:
+        _acting_as_student.add(user_id)
+        await message.answer(
+            "🔁 Теперь ты ученик. Карточки ДЗ всё равно будут приходить сюда — "
+            "чтобы нажать «Принять»/«Доработка», вернись через /switch",
+            reply_markup=student_keyboard(),
+        )
 
 
 @dp.message(Command("cancel"))
