@@ -1,6 +1,7 @@
 """Общее для всех обработчиков: экземпляр бота, роли, клавиатуры, помощники."""
 import asyncio
 import logging
+import os
 from collections import defaultdict
 
 from aiogram import Bot, types
@@ -10,7 +11,6 @@ from aiogram.types import (
     InputMediaPhoto,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
 
 from datetime import timezone
@@ -29,6 +29,7 @@ BTN_MY = "📋 Мои ДЗ"
 # Состояния (хранятся в таблице user_states и переживают перезапуск бота)
 SUBMIT = "submit"  # ученик собирает отправку: data = {mode, assignment_id|homework_id, text, files}
 REVIEW = "review"  # проверяющий пишет комментарий: data = {homework_id, action, text, files}
+REFERENCE = "reference"  # админ задаёт эталон задания: data = {assignment_id, text, files}
 
 STATUS_LABELS = {
     "new": "🕐 На проверке",
@@ -222,11 +223,14 @@ async def send_files(chat_id, files):
             await bot.send_video(chat_id, file_id)
 
 
-async def notify_reviewers(text, files, homework_id):
+async def notify_reviewers(text, files, homework_id, extra_rows=None):
+    keyboard = review_keyboard(homework_id)
+    if extra_rows:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=list(extra_rows) + keyboard.inline_keyboard)
     for reviewer in REVIEWERS:
         try:
             await send_files(reviewer, files)
-            await bot.send_message(reviewer, clip(text), reply_markup=review_keyboard(homework_id))
+            await bot.send_message(reviewer, clip(text), reply_markup=keyboard)
         except Exception:
             log.exception("Не удалось отправить ДЗ #%s проверяющему %s", homework_id, reviewer)
 
@@ -259,3 +263,34 @@ async def _flush_album(group_id, handler):
             log.exception("Ошибка обработки альбома %s", group_id)
 
 
+
+
+IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+             ".webp": "image/webp", ".gif": "image/gif"}
+
+
+async def download_image(file_type, file_id):
+    """Скачивает файл из Telegram.
+
+    Возвращает (mime, bytes) для картинок и (None, описание) для всего остального —
+    видео, PDF, Excel и т.п. ИИ пока смотрит только картинки.
+    """
+    if file_type == "video":
+        return None, "видео"
+    try:
+        tg_file = await bot.get_file(file_id)
+    except Exception as e:
+        log.warning("Не удалось получить файл %s: %s", file_id, e)
+        return None, "файл не удалось скачать (возможно, больше 20 МБ)"
+
+    path = tg_file.file_path or ""
+    ext = os.path.splitext(path)[1].lower()
+    if file_type == "photo":
+        mime = "image/jpeg"
+    elif ext in IMAGE_EXT:
+        mime = IMAGE_EXT[ext]
+    else:
+        return None, f"файл {ext or 'без расширения'}"
+
+    buffer = await bot.download_file(path)
+    return mime, buffer.read()

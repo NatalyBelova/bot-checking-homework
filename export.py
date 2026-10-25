@@ -37,7 +37,11 @@ def _student(row):
 def _reviewer(value):
     if not value:
         return ""
-    return "ИИ" if value == "ai" else "Проверяющий"
+    if value == "ai":
+        return "ИИ"
+    if value.startswith("ai+human"):
+        return "ИИ + проверяющий"
+    return "Проверяющий"
 
 
 def _sheet(wb, title, headers, widths, first=False):
@@ -118,7 +122,7 @@ def build_workbook(assignments, homeworks, versions):
     for v in versions:
         ws.append([
             v["homework_id"], v["version_num"], _local(v["created_at"]), v["text"] or "",
-            v["files"], v["comment"] or "", _reviewer(v["reviewed_by"]) if v["comment"] is not None else "",
+            v["files"], v["comment"] or "", _reviewer(v["reviewed_by"]),
         ])
         r = ws.max_row
         ws.cell(row=r, column=3).number_format = DATE_FORMAT

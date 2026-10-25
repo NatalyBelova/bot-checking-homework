@@ -1,19 +1,20 @@
 import asyncio
 
 from aiogram import Dispatcher, F, Router, types
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import admin
 import db
+import decisions
 from common import (
-    ALBUM_DELAY, BTN_MY, BTN_NEW, REVIEW, STATUS_LABELS, SUBMIT,
-    _acting_as_student, _album_tasks, _albums, _idle_albums, _user_locks,
-    bot, clip, extract_content, fix_keyboard, gather_album, get_user_display,
-    homework_title, is_admin, is_reviewer, is_staff, log, merge_text, notify_reviewers, review_confirm_keyboard,
-    review_keyboard, send_files, staff_keyboard, student_keyboard, submit_keyboard,
+    ALBUM_DELAY, BTN_MY, BTN_NEW, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT,
+    _acting_as_student, _albums, _idle_albums, _user_locks,
+    bot, clip, extract_content, gather_album, get_user_display,
+    homework_title, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
+    review_keyboard, staff_keyboard, student_keyboard, submit_keyboard,
 )
-from config import ADMINS, DEV_MODE, REVIEWERS
+from config import ADMINS, AI_MODE, DEV_MODE, OPENAI_MODEL, REVIEWERS
 
 dp = Dispatcher()
 fallback_router = Router()  # подключается последним: ловит всё, что не поймали другие
@@ -74,38 +75,6 @@ async def cancel(message: types.Message):
         await message.answer("Действие сброшено", reply_markup=staff_keyboard(message.from_user.id))
     else:
         await message.answer("Действие сброшено", reply_markup=student_keyboard())
-
-
-@dp.message(Command("tasks"))
-async def list_tasks(message: types.Message):
-    if not is_staff(message.from_user.id):
-        return
-    assignments = await db.list_assignments(active_only=False)
-    if not assignments:
-        await message.answer("Заданий пока нет. Добавь: /addtask Название")
-        return
-    lines = ["📚 Задания:\n"]
-    for a in assignments:
-        flags = []
-        if not a["is_active"]:
-            flags.append("скрыто")
-        if not a["reference"]:
-            flags.append("нет эталона")
-        suffix = f" ({', '.join(flags)})" if flags else ""
-        lines.append(f"#{a['id']} {a['title']} [{a['kind']}]{suffix}")
-    await message.answer("\n".join(lines))
-
-
-@dp.message(Command("addtask"))
-async def add_task(message: types.Message, command: CommandObject):
-    if not is_staff(message.from_user.id):
-        return
-    title = (command.args or "").strip()
-    if not title:
-        await message.answer("Напиши название после команды: /addtask Урок 1. Чек-лист")
-        return
-    assignment_id = await db.add_assignment(title)
-    await message.answer(f"Задание #{assignment_id} «{title}» добавлено ✅")
 
 
 # ---------------------------------------------------------------------------
@@ -237,14 +206,14 @@ async def confirm_send(callback: types.CallbackQuery):
             return
         version = await db.add_version(homework_id, text, files)
         header = f"🔄 Доработка (попытка {version}) по {homework_title(hw)} от {user_display}"
-        await notify_reviewers(f"{header}\n\n{text}".strip(), files, homework_id)
+        decisions.start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
         await callback.message.answer(f"Доработка по ДЗ #{homework_id} отправлена ✅")
     else:
         homework_id = await db.create_homework(
             user.id, data.get("assignment_id"), text, files, student_name=user_display)
         hw = await db.get_homework(homework_id)
         header = f"🆕 Новое {homework_title(hw)} от {user_display}"
-        await notify_reviewers(f"{header}\n\n{text}".strip(), files, homework_id)
+        decisions.start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
         await callback.message.answer(
             f"ДЗ #{homework_id} отправлено на проверку ✅\n\nМожешь отправить ещё одно 👇",
             reply_markup=student_keyboard(),
@@ -289,9 +258,7 @@ async def accept(callback: types.CallbackQuery):
         return
 
     await callback.message.edit_reply_markup(reply_markup=None)
-    await db.update_status(homework_id, "accepted")
-    await db.add_comment(homework_id, None, reviewed_by=f"human:{callback.from_user.id}")
-    await bot.send_message(hw["student_id"], f"✅ {homework_title(hw)} принято!")
+    await decisions.apply_decision(hw, "accept", None, [], reviewed_by=f"human:{callback.from_user.id}")
     await callback.message.answer(f"ДЗ #{homework_id} принято ✅")
     await callback.answer()
 
@@ -361,32 +328,15 @@ async def confirm_review(callback: types.CallbackQuery):
         return
 
     text, files = data.get("text", ""), data.get("files", [])
-    student_id = hw["student_id"]
-    await db.add_comment(homework_id, text, reviewed_by=f"human:{reviewer_id}")
+    reviewed_by = data.get("reviewed_by") or f"human:{reviewer_id}"
+    await decisions.apply_decision(hw, data["action"], text, files, reviewed_by=reviewed_by)
+    if data.get("ai_review_id"):
+        await db.mark_ai_review_applied(data["ai_review_id"], reviewed_by)
 
     if data["action"] == "accept":
-        await db.update_status(homework_id, "accepted")
-        caption = f"✅ {homework_title(hw)} принято!"
-        if text:
-            caption += f"\n\n{text}"
-        await bot.send_message(student_id, clip(caption))
-        await send_files(student_id, files)
         await callback.message.answer(f"ДЗ #{homework_id} принято ✅")
     else:
-        await db.update_status(homework_id, "revision")
-        caption = f"🔄 {homework_title(hw)}: нужно доработать"
-        if text:
-            caption += f"\n\n{text}"
-        await send_files(student_id, files)
-        await bot.send_message(student_id, clip(caption), reply_markup=fix_keyboard(homework_id))
-
-        # если ученик ничего не делает в боте — сразу ждём от него исправления
-        student_state, _ = await db.get_state(student_id)
-        if student_state is None:
-            await db.set_state(student_id, SUBMIT,
-                               {"mode": "revision", "homework_id": homework_id, "text": "", "files": []})
         await callback.message.answer(f"Комментарий по ДЗ #{homework_id} отправлен ученику ✏️")
-
     await callback.answer()
 
 
@@ -414,6 +364,61 @@ async def cancel_review(callback: types.CallbackQuery):
     await callback.answer()
 
 
+
+# ---------------------------------------------------------------------------
+# Предложение ИИ
+# ---------------------------------------------------------------------------
+
+async def _ai_review_or_alert(callback):
+    if not is_reviewer(callback.from_user.id):
+        await callback.answer()
+        return None, None
+    review = await db.get_ai_review(int(callback.data.split("_")[1]))
+    if not review or review["verdict"] not in ("accept", "revise"):
+        await callback.answer("Предложение ИИ не найдено", show_alert=True)
+        return None, None
+    hw = await _pending_homework_or_alert(callback, review["homework_id"])
+    if not hw:
+        return None, None
+    if review["version_id"] != await db.get_latest_version_id(hw["id"]):
+        await callback.answer("Ученик уже прислал новую попытку — это предложение устарело", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return None, None
+    return review, hw
+
+
+@dp.callback_query(F.data.startswith("aiok_"))
+async def ai_accept_suggestion(callback: types.CallbackQuery):
+    review, hw = await _ai_review_or_alert(callback)
+    if not review:
+        return
+    reviewed_by = f"ai+human:{callback.from_user.id}"
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await decisions.apply_decision(hw, review["verdict"], review["comment"], [], reviewed_by=reviewed_by)
+    await db.mark_ai_review_applied(review["id"], reviewed_by)
+    result = "принято ✅" if review["verdict"] == "accept" else "отправлено на доработку 🔄"
+    await callback.message.answer(f"ДЗ #{hw['id']} {result} — с комментарием ИИ")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("aiedit_"))
+async def ai_edit_suggestion(callback: types.CallbackQuery):
+    review, hw = await _ai_review_or_alert(callback)
+    if not review:
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await db.set_state(callback.from_user.id, REVIEW, {
+        "homework_id": hw["id"], "action": review["verdict"], "text": "", "files": [],
+        "ai_review_id": review["id"], "reviewed_by": f"ai+human:{callback.from_user.id}",
+    })
+    action = "принятия" if review["verdict"] == "accept" else "доработки"
+    await callback.message.answer(
+        f"Пришли свой вариант комментария для {action} ДЗ #{hw['id']}. "
+        "Текст ИИ ниже — его удобно скопировать и поправить 👇")
+    await callback.message.answer(review["comment"] or "(ИИ не написал комментарий)")
+    await callback.answer()
+
+
 # ---------------------------------------------------------------------------
 # Все остальные сообщения
 # ---------------------------------------------------------------------------
@@ -436,6 +441,9 @@ async def handle_message(message: types.Message):
         return
     if state == SUBMIT:
         await gather_album(message, add_to_submission)
+        return
+    if state == REFERENCE:
+        await gather_album(message, admin.add_to_reference)
         return
 
     # альбом приходит пачкой — отвечаем один раз
@@ -460,6 +468,7 @@ dp.include_router(fallback_router)
 async def main():
     db.init_db()
     log.info("Проверяющие: %s, админы: %s", REVIEWERS, ADMINS)
+    log.info("ИИ-проверка: %s%s", AI_MODE, f" ({OPENAI_MODEL})" if AI_MODE != "off" else "")
     await dp.start_polling(bot)
 
 

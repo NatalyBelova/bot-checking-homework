@@ -7,10 +7,11 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 
 import db
 import export
+from config import AI_MODE
 from common import (
-    BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, STATUS_LABELS,
-    clip, fmt_ago, fmt_dt, homework_title, is_admin, is_reviewer, is_staff, log,
-    review_keyboard, send_files, student_label,
+    BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
+    _user_locks, bot, clip, download_image, extract_content, fmt_ago, fmt_dt, homework_title,
+    is_admin, is_reviewer, is_staff, log, merge_text, review_keyboard, send_files, student_label,
 )
 
 router = Router()
@@ -31,10 +32,10 @@ def _btn(text, data):
 
 
 def _reviewer_label(reviewed_by):
-    if not reviewed_by:
-        return "проверяющий"
     if reviewed_by == "ai":
         return "🤖 ИИ"
+    if (reviewed_by or "").startswith("ai+human"):
+        return "🤖 ИИ (подтвердил проверяющий)"
     return "проверяющий"
 
 
@@ -67,6 +68,15 @@ async def stats(message: types.Message):
     ]
     if o["avg_attempts"]:
         lines.append(f"В среднем попыток до принятия: {o['avg_attempts']}")
+
+    ai = await db.ai_stats()
+    if AI_MODE != "off" or ai["total"]:
+        mode = {"off": "выключена", "suggest": "ИИ предлагает, человек подтверждает",
+                "auto": "ИИ решает сам, спорное — человеку"}[AI_MODE]
+        lines += ["", f"🤖 ИИ-проверка: {mode}",
+                  f"Проверок ИИ: {ai['total']} · ИИ решил сам: {ai['auto_applied']} · "
+                  f"подтверждено человеком: {ai['confirmed']}"
+                  + (f" · ошибок: {ai['errors']}" if ai["errors"] else "")]
 
     if by_task:
         lines += ["", "По заданиям (✅ принято · 🔄 доработка · 🕐 проверка):"]
@@ -259,3 +269,184 @@ async def export_excel(message: types.Message):
         BufferedInputFile(content, filename=filename),
         caption="📥 Листы: «Прогресс» (ученики × задания), «Все ДЗ», «Попытки»",
     )
+
+
+# ---------------------------------------------------------------------------
+# Задания и эталоны
+# ---------------------------------------------------------------------------
+
+KIND_LABELS = {"screenshots": "скриншоты", "checklist": "чек-лист", "jira": "Jira"}
+
+
+def _has_reference(a):
+    return bool(a["reference"]) or bool(a.get("ref_files"))
+
+
+@router.message(Command("tasks"), _staff)
+async def list_tasks(message: types.Message):
+    assignments = await db.list_assignments(active_only=False)
+    if not assignments:
+        await message.answer("Заданий пока нет. Добавь: /addtask Название")
+        return
+
+    buttons = []
+    for a in assignments:
+        marks = ("✅" if _has_reference(a) else "⚠️") + ("" if a["is_active"] else " 🙈")
+        buttons.append([_btn(f"{marks} #{a['id']} {a['title']}"[:60], f"tk_{a['id']}")])
+    await message.answer(
+        "📚 Задания. ✅ — эталон задан, ⚠️ — нет эталона (ИИ такое не проверяет), 🙈 — скрыто от учеников.\n"
+        "Нажми на задание, чтобы задать эталон.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.message(Command("addtask"), _staff)
+async def add_task(message: types.Message, command: CommandObject):
+    title = (command.args or "").strip()
+    if not title:
+        await message.answer("Напиши название после команды: /addtask Урок 1. Чек-лист")
+        return
+    assignment_id = await db.add_assignment(title)
+    await message.answer(
+        f"Задание #{assignment_id} «{title}» добавлено ✅",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            _btn("✏️ Задать эталон", f"tkref_{assignment_id}")]]),
+    )
+
+
+async def _task_card(assignment_id):
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        return None, None
+    lines = [
+        f"📚 #{a['id']} {a['title']}",
+        f"Тип: {KIND_LABELS.get(a['kind'], a['kind'])} · "
+        + ("видно ученикам" if a["is_active"] else "🙈 скрыто от учеников"),
+        "",
+    ]
+    if _has_reference(a):
+        lines.append("Эталон и критерии:")
+        lines.append(clip(a["reference"], 2500) if a["reference"] else "(только картинки)")
+        if a["ref_files"]:
+            lines.append(f"\n🖼 Картинок эталона: {a['ref_files']}")
+    else:
+        lines.append("⚠️ Эталон не задан — ИИ не будет проверять это задание, работы уйдут проверяющему.")
+
+    buttons = [[_btn("✏️ Задать эталон заново" if _has_reference(a) else "✏️ Задать эталон",
+                     f"tkref_{a['id']}")]]
+    if a["ref_files"]:
+        buttons.append([_btn("🖼 Показать картинки эталона", f"tkimg_{a['id']}")])
+    buttons.append([_btn("👁 Показать ученикам" if not a["is_active"] else "🙈 Скрыть от учеников",
+                         f"tktog_{a['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data.startswith("tk_"), _staff)
+async def task_card(callback: types.CallbackQuery):
+    text, keyboard = await _task_card(int(callback.data.split("_")[1]))
+    if not text:
+        await callback.answer("Задание не найдено", show_alert=True)
+        return
+    await callback.message.answer(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tktog_"), _staff)
+async def task_toggle(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание не найдено", show_alert=True)
+        return
+    await db.set_assignment_active(assignment_id, not a["is_active"])
+    text, keyboard = await _task_card(assignment_id)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer("Скрыто" if a["is_active"] else "Снова видно ученикам")
+
+
+@router.callback_query(F.data.startswith("tkimg_"), _staff)
+async def task_images(callback: types.CallbackQuery):
+    images = await db.get_reference_files(int(callback.data.split("_")[1]))
+    await callback.answer()
+    for i in range(0, len(images), 10):
+        chunk = images[i:i + 10]
+        media = [types.InputMediaPhoto(media=BufferedInputFile(data, filename=f"ref{i + j}.jpg"))
+                 for j, (_, data) in enumerate(chunk)]
+        if len(media) == 1:
+            await callback.message.answer_photo(media[0].media)
+        else:
+            await callback.message.answer_media_group(media)
+
+
+@router.callback_query(F.data.startswith("tkref_"), _staff)
+async def task_reference_start(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание не найдено", show_alert=True)
+        return
+    await db.set_state(callback.from_user.id, REFERENCE,
+                       {"assignment_id": assignment_id, "text": "", "files": []})
+    await callback.message.answer(
+        f"✏️ Эталон для «{a['title']}»\n\n"
+        "Пришли критерии приёмки текстом: что должно быть в работе, что считается ошибкой, "
+        "за что точно возвращать на доработку. Можно добавить эталонные скриншоты "
+        "(как выглядит правильный результат).\n\n"
+        "Можно несколькими сообщениями. Старый эталон заменится, когда нажмёшь «Сохранить»."
+    )
+    await callback.answer()
+
+
+async def add_to_reference(messages):
+    """Вызывается из общего обработчика, когда админ в состоянии REFERENCE."""
+    user_id = messages[0].from_user.id
+    text, files = extract_content(messages)
+    async with _user_locks[user_id]:
+        state, data = await db.get_state(user_id)
+        if state != REFERENCE:
+            return
+        data["text"] = merge_text(data.get("text", ""), text)
+        data["files"] = data.get("files", []) + files
+        await db.set_state(user_id, REFERENCE, data)
+
+    await bot.send_message(
+        user_id,
+        f"В эталоне: текст {len(data['text'])} символов, файлов {len(data['files'])}. "
+        "Можно прислать ещё 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            _btn("💾 Сохранить эталон", "refsave"), _btn("❌ Отмена", "refcancel")]]),
+    )
+
+
+@router.callback_query(F.data == "refsave", _staff)
+async def reference_save(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await callback.message.edit_reply_markup(reply_markup=None)
+    async with _user_locks[user_id]:
+        state, data = await db.get_state(user_id)
+        if state != REFERENCE or not (data.get("text") or data.get("files")):
+            await callback.answer("Нечего сохранять", show_alert=True)
+            return
+        await db.clear_state(user_id)
+    await callback.answer()
+
+    images, skipped = [], []
+    for file_type, file_id in data["files"]:
+        mime, content = await download_image(file_type, file_id)
+        if mime:
+            images.append((mime, content))
+        else:
+            skipped.append(content)
+
+    await db.set_reference(data["assignment_id"], data.get("text", ""), images)
+    text, keyboard = await _task_card(data["assignment_id"])
+    note = f"\n\n⚠️ Не сохранено (ИИ понимает только картинки): {', '.join(skipped)}" if skipped else ""
+    await callback.message.answer(f"💾 Эталон сохранён{note}\n\n{text}", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "refcancel", _staff)
+async def reference_cancel(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await db.clear_state(callback.from_user.id)
+    await callback.message.answer("Отменено, эталон не изменён")
+    await callback.answer()

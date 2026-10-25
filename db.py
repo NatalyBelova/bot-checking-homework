@@ -131,6 +131,33 @@ MIGRATIONS = [
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # --- картинки эталона (храним сами файлы: file_id тестового и боевого ботов разные) ---
+    """
+    CREATE TABLE IF NOT EXISTS assignment_files (
+        id SERIAL PRIMARY KEY,
+        assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+        mime TEXT NOT NULL DEFAULT 'image/jpeg',
+        data BYTEA NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # --- результаты ИИ-проверки ---
+    """
+    CREATE TABLE IF NOT EXISTS ai_reviews (
+        id SERIAL PRIMARY KEY,
+        homework_id INTEGER NOT NULL REFERENCES homeworks(id) ON DELETE CASCADE,
+        version_id INTEGER REFERENCES versions(id) ON DELETE CASCADE,
+        verdict TEXT,               -- accept | revise | unsure | NULL при ошибке
+        comment TEXT,               -- текст для ученика
+        note TEXT,                  -- заметка для проверяющего
+        model TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        error TEXT,
+        applied_by TEXT,            -- 'ai' | 'ai+human:<id>' | NULL (не применено)
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id)",
     "CREATE INDEX IF NOT EXISTS idx_versions_homework ON versions(homework_id)",
     "CREATE INDEX IF NOT EXISTS idx_version_files_version ON version_files(version_id)",
@@ -152,10 +179,11 @@ def list_assignments(active_only=True):
     with _cursor(dict_rows=True) as cursor:
         cursor.execute(
             f"""
-            SELECT id, title, kind, reference, is_active, sort_order
-            FROM assignments
-            {"WHERE is_active" if active_only else ""}
-            ORDER BY sort_order, id
+            SELECT a.id, a.title, a.kind, a.reference, a.is_active, a.sort_order,
+                   (SELECT COUNT(*) FROM assignment_files f WHERE f.assignment_id = a.id) AS ref_files
+            FROM assignments a
+            {"WHERE a.is_active" if active_only else ""}
+            ORDER BY a.sort_order, a.id
             """
         )
         return cursor.fetchall()
@@ -165,7 +193,11 @@ def list_assignments(active_only=True):
 def get_assignment(assignment_id):
     with _cursor(dict_rows=True) as cursor:
         cursor.execute(
-            "SELECT id, title, kind, reference, is_active FROM assignments WHERE id=%s",
+            """
+            SELECT a.id, a.title, a.kind, a.reference, a.is_active,
+                   (SELECT COUNT(*) FROM assignment_files f WHERE f.assignment_id = a.id) AS ref_files
+            FROM assignments a WHERE a.id=%s
+            """,
             (assignment_id,),
         )
         return cursor.fetchone()
@@ -565,3 +597,94 @@ def export_data():
         )
         versions = cursor.fetchall()
         return assignments, homeworks, versions
+
+
+# ---------------------------------------------------------------------------
+# Эталоны и ИИ-проверка
+# ---------------------------------------------------------------------------
+
+@_async
+def set_reference(assignment_id, text, images):
+    """Заменяет эталон задания. images — список (mime, bytes)."""
+    with _cursor() as cursor:
+        cursor.execute("UPDATE assignments SET reference=%s WHERE id=%s", (text or None, assignment_id))
+        cursor.execute("DELETE FROM assignment_files WHERE assignment_id=%s", (assignment_id,))
+        for mime, data in images:
+            cursor.execute(
+                "INSERT INTO assignment_files (assignment_id, mime, data) VALUES (%s, %s, %s)",
+                (assignment_id, mime, psycopg2.Binary(data)),
+            )
+
+
+@_async
+def get_reference_files(assignment_id):
+    """[(mime, bytes)] картинок эталона."""
+    with _cursor() as cursor:
+        cursor.execute(
+            "SELECT mime, data FROM assignment_files WHERE assignment_id=%s ORDER BY id",
+            (assignment_id,),
+        )
+        return [(mime, bytes(data)) for mime, data in cursor.fetchall()]
+
+
+@_async
+def count_reference_files(assignment_id):
+    with _cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM assignment_files WHERE assignment_id=%s", (assignment_id,))
+        return cursor.fetchone()[0]
+
+
+@_async
+def add_ai_review(homework_id, version_id, verdict=None, comment=None, note=None,
+                  model=None, input_tokens=None, output_tokens=None, error=None):
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ai_reviews (homework_id, version_id, verdict, comment, note, model,
+                                    input_tokens, output_tokens, error)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (homework_id, version_id, verdict, comment, note, model, input_tokens, output_tokens, error),
+        )
+        return cursor.fetchone()[0]
+
+
+@_async
+def get_ai_review(review_id):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT * FROM ai_reviews WHERE id=%s", (review_id,))
+        return cursor.fetchone()
+
+
+@_async
+def mark_ai_review_applied(review_id, applied_by):
+    with _cursor() as cursor:
+        cursor.execute("UPDATE ai_reviews SET applied_by=%s WHERE id=%s", (applied_by, review_id))
+
+
+@_async
+def get_latest_version_id(homework_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            "SELECT id FROM versions WHERE homework_id=%s ORDER BY id DESC LIMIT 1", (homework_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+@_async
+def ai_stats():
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE error IS NOT NULL) AS errors,
+                   COUNT(*) FILTER (WHERE applied_by = 'ai') AS auto_applied,
+                   COUNT(*) FILTER (WHERE applied_by LIKE 'ai+human:%%') AS confirmed,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens
+            FROM ai_reviews
+            """
+        )
+        return cursor.fetchone()

@@ -3,3 +3,4 @@ python-dotenv
 psycopg2-binary
 openpyxl
 tzdata
+openai==3.37.0
