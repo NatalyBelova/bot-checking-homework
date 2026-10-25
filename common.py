@@ -55,6 +55,15 @@ def is_reviewer(user_id):
     return user_id in REVIEWERS and user_id not in _acting_as_student
 
 
+async def deny_callback(callback):
+    """Отвечает на нажатие кнопки, которая этому пользователю недоступна."""
+    if callback.from_user.id in _acting_as_student:
+        await callback.answer("Сейчас ты в роли ученика. Вернись через /switch и нажми ещё раз",
+                              show_alert=True)
+    else:
+        await callback.answer("Эта кнопка тебе недоступна", show_alert=True)
+
+
 def is_admin(user_id):
     return user_id in ADMINS and user_id not in _acting_as_student
 

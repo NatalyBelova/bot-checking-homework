@@ -10,7 +10,7 @@ import decisions
 from common import (
     ALBUM_DELAY, BTN_MY, BTN_NEW, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT,
     _acting_as_student, _albums, _idle_albums, _user_locks,
-    bot, clip, extract_content, gather_album, get_user_display,
+    bot, clip, deny_callback, extract_content, gather_album, get_user_display,
     homework_title, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
     review_keyboard, staff_keyboard, student_keyboard, submit_keyboard,
 )
@@ -250,7 +250,7 @@ async def _pending_homework_or_alert(callback, homework_id):
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept(callback: types.CallbackQuery):
     if not is_reviewer(callback.from_user.id):
-        await callback.answer()
+        await deny_callback(callback)
         return
     homework_id = int(callback.data.split("_")[1])
     hw = await _pending_homework_or_alert(callback, homework_id)
@@ -265,7 +265,7 @@ async def accept(callback: types.CallbackQuery):
 
 async def _start_review(callback, action):
     if not is_reviewer(callback.from_user.id):
-        await callback.answer()
+        await deny_callback(callback)
         return
     homework_id = int(callback.data.split("_")[1])
     hw = await _pending_homework_or_alert(callback, homework_id)
@@ -371,7 +371,7 @@ async def cancel_review(callback: types.CallbackQuery):
 
 async def _ai_review_or_alert(callback):
     if not is_reviewer(callback.from_user.id):
-        await callback.answer()
+        await deny_callback(callback)
         return None, None
     review = await db.get_ai_review(int(callback.data.split("_")[1]))
     if not review or review["verdict"] not in ("accept", "revise"):
@@ -458,6 +458,12 @@ async def handle_message(message: types.Message):
     else:
         await message.answer("Нажми кнопку «📤 Отправить новое ДЗ», чтобы начать 👇",
                              reply_markup=student_keyboard())
+
+
+@fallback_router.callback_query()
+async def handle_unknown_callback(callback: types.CallbackQuery):
+    """Кнопка, которую никто не обработал (например, админская кнопка в роли ученика)."""
+    await deny_callback(callback)
 
 
 # порядок важен: сначала кнопки админа, потом «всё остальное»
