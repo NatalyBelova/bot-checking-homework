@@ -20,7 +20,8 @@ _pool = None
 def _get_pool():
     global _pool
     if _pool is None:
-        _pool = ThreadedConnectionPool(1, 10, DATABASE_URL)
+        # время в базе всегда в UTC — в местное переводим при показе
+        _pool = ThreadedConnectionPool(1, 10, DATABASE_URL, options="-c timezone=UTC")
     return _pool
 
 
@@ -390,3 +391,177 @@ def set_state(user_id, state, data=None):
 def clear_state(user_id):
     with _cursor() as cursor:
         cursor.execute("DELETE FROM user_states WHERE user_id=%s", (user_id,))
+
+
+# ---------------------------------------------------------------------------
+# Отслеживание и статистика (для админа)
+# ---------------------------------------------------------------------------
+
+# Имя ученика берём из последнего ДЗ, где оно сохранено (у старых ДЗ его нет)
+_STUDENT_NAME = """
+    (SELECT h2.student_name FROM homeworks h2
+     WHERE h2.student_id = {alias}.student_id AND h2.student_name IS NOT NULL
+     ORDER BY h2.id DESC LIMIT 1)
+"""
+
+
+@_async
+def stats_overview():
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE status='new') AS pending,
+                COUNT(*) FILTER (WHERE status='revision') AS revision,
+                COUNT(*) FILTER (WHERE status='accepted') AS accepted,
+                COUNT(DISTINCT student_id) AS students,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS new_week,
+                COUNT(*) FILTER (WHERE status='accepted'
+                                 AND updated_at >= NOW() - INTERVAL '7 days') AS accepted_week,
+                ROUND(AVG(current_version) FILTER (WHERE status='accepted'), 1) AS avg_attempts,
+                MIN(updated_at) FILTER (WHERE status='new') AS oldest_pending
+            FROM homeworks
+            """
+        )
+        return cursor.fetchone()
+
+
+@_async
+def stats_by_assignment():
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            """
+            SELECT a.id, a.title,
+                   COUNT(h.id) AS total,
+                   COUNT(h.id) FILTER (WHERE h.status='accepted') AS accepted,
+                   COUNT(h.id) FILTER (WHERE h.status='revision') AS revision,
+                   COUNT(h.id) FILTER (WHERE h.status='new') AS pending
+            FROM assignments a
+            LEFT JOIN homeworks h ON h.assignment_id = a.id
+            GROUP BY a.id
+            ORDER BY a.sort_order, a.id
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE status='accepted') AS accepted,
+                   COUNT(*) FILTER (WHERE status='revision') AS revision,
+                   COUNT(*) FILTER (WHERE status='new') AS pending
+            FROM homeworks WHERE assignment_id IS NULL
+            """
+        )
+        no_task = cursor.fetchone()
+        if no_task["total"]:
+            rows.append({"id": None, "title": "Без задания", **no_task})
+        return rows
+
+
+@_async
+def list_pending(limit=30):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            f"""
+            SELECT h.id, h.student_id, h.current_version, h.updated_at,
+                   a.title AS assignment_title,
+                   {_STUDENT_NAME.format(alias="h")} AS student_name
+            FROM homeworks h
+            LEFT JOIN assignments a ON a.id = h.assignment_id
+            WHERE h.status='new'
+            ORDER BY h.updated_at, h.id
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return cursor.fetchall()
+
+
+@_async
+def list_students(offset=0, limit=15):
+    """Ученики с прогрессом, последние активные сверху. Возвращает (rows, total)."""
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT COUNT(DISTINCT student_id) AS n FROM homeworks")
+        total = cursor.fetchone()["n"]
+        cursor.execute(
+            f"""
+            SELECT s.student_id, s.total, s.accepted, s.revision, s.pending, s.last_activity,
+                   {_STUDENT_NAME.format(alias="s")} AS student_name
+            FROM (
+                SELECT student_id,
+                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE status='accepted') AS accepted,
+                       COUNT(*) FILTER (WHERE status='revision') AS revision,
+                       COUNT(*) FILTER (WHERE status='new') AS pending,
+                       MAX(COALESCE(updated_at, created_at)) AS last_activity
+                FROM homeworks
+                GROUP BY student_id
+            ) s
+            ORDER BY s.last_activity DESC NULLS LAST
+            OFFSET %s LIMIT %s
+            """,
+            (offset, limit),
+        )
+        return cursor.fetchall(), total
+
+
+@_async
+def get_student_name(student_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT student_name FROM homeworks
+            WHERE student_id=%s AND student_name IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (student_id,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+@_async
+def get_version_files(version_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            "SELECT file_type, file_id FROM version_files WHERE version_id=%s ORDER BY id",
+            (version_id,),
+        )
+        return cursor.fetchall()
+
+
+@_async
+def export_data():
+    """Всё для выгрузки в Excel: задания, ДЗ, попытки."""
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT id, title FROM assignments ORDER BY sort_order, id")
+        assignments = cursor.fetchall()
+
+        cursor.execute(
+            f"""
+            SELECT h.id, h.student_id, h.status, h.current_version, h.created_at,
+                   COALESCE(h.updated_at, h.created_at) AS updated_at,
+                   h.assignment_id, a.title AS assignment_title,
+                   {_STUDENT_NAME.format(alias="h")} AS student_name,
+                   (SELECT v.comment FROM versions v
+                    WHERE v.homework_id = h.id AND v.comment IS NOT NULL
+                    ORDER BY v.id DESC LIMIT 1) AS last_comment
+            FROM homeworks h
+            LEFT JOIN assignments a ON a.id = h.assignment_id
+            ORDER BY h.id
+            """
+        )
+        homeworks = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT v.homework_id, COALESCE(v.version_num, 0) AS version_num, v.created_at,
+                   v.text, v.comment, v.reviewed_by,
+                   (SELECT COUNT(*) FROM version_files f WHERE f.version_id = v.id) AS files
+            FROM versions v
+            ORDER BY v.homework_id, v.id
+            """
+        )
+        versions = cursor.fetchall()
+        return assignments, homeworks, versions

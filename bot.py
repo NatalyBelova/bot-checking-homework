@@ -1,202 +1,22 @@
 import asyncio
-import logging
-from collections import defaultdict
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Dispatcher, F, Router, types
 from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputMediaPhoto,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+import admin
 import db
-from config import DEV_MODE, REVIEWERS, TOKEN
+from common import (
+    ALBUM_DELAY, BTN_MY, BTN_NEW, REVIEW, STATUS_LABELS, SUBMIT,
+    _acting_as_student, _album_tasks, _albums, _idle_albums, _user_locks,
+    bot, clip, extract_content, fix_keyboard, gather_album, get_user_display,
+    homework_title, is_admin, is_reviewer, is_staff, log, merge_text, notify_reviewers, review_confirm_keyboard,
+    review_keyboard, send_files, staff_keyboard, student_keyboard, submit_keyboard,
+)
+from config import ADMINS, DEV_MODE, REVIEWERS
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("homework_bot")
-
-bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
-BTN_NEW = "📤 Отправить новое ДЗ"
-BTN_MY = "📋 Мои ДЗ"
-
-# Состояния (хранятся в таблице user_states и переживают перезапуск бота)
-SUBMIT = "submit"  # ученик собирает отправку: data = {mode, assignment_id|homework_id, text, files}
-REVIEW = "review"  # проверяющий пишет комментарий: data = {homework_id, action, text, files}
-
-STATUS_LABELS = {
-    "new": "🕐 На проверке",
-    "revision": "🔄 На доработке",
-    "accepted": "✅ Принято",
-}
-
-ALBUM_DELAY = 0.8  # сек: Telegram присылает альбом отдельными сообщениями
-MAX_TEXT = 3500    # лимит сообщения Telegram — 4096 символов
-
-_albums = defaultdict(list)
-_album_tasks = {}
-_idle_albums = set()
-_user_locks = defaultdict(asyncio.Lock)
-_acting_as_student = set()  # DEV_MODE: проверяющие, переключившиеся в роль ученика
-
-
-# ---------------------------------------------------------------------------
-# Вспомогательные функции
-# ---------------------------------------------------------------------------
-
-def is_reviewer(user_id):
-    return user_id in REVIEWERS and user_id not in _acting_as_student
-
-
-def get_user_display(user: types.User):
-    if user.username:
-        return f"@{user.username}"
-    if user.full_name:
-        return user.full_name
-    return f"id:{user.id}"
-
-
-def clip(text, limit=MAX_TEXT):
-    text = text or ""
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def student_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY)]],
-        resize_keyboard=True,
-    )
-
-
-def review_keyboard(homework_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
-            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}"),
-        ],
-        [InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")],
-    ])
-
-
-def submit_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_send"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send"),
-    ]])
-
-
-def review_confirm_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_review"),
-        InlineKeyboardButton(text="➕ Добавить ещё", callback_data="add_review"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_review"),
-    ]])
-
-
-def fix_keyboard(homework_id):
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"✏️ Отправить доработку по ДЗ #{homework_id}",
-                             callback_data=f"fix_{homework_id}"),
-    ]])
-
-
-def homework_title(hw):
-    title = f"ДЗ #{hw['id']}"
-    if hw.get("assignment_title"):
-        title += f" «{hw['assignment_title']}»"
-    return title
-
-
-def extract_content(messages):
-    """Текст и файлы из одного сообщения или альбома.
-
-    Ссылки, спрятанные под текстом (например «353» → задача в Jira),
-    дописываются в конец, иначе они теряются при пересылке текста.
-    """
-    texts, files, links = [], [], []
-    for msg in messages:
-        text = msg.text or msg.caption
-        if text:
-            texts.append(text)
-        for entity in (msg.entities or msg.caption_entities or []):
-            if entity.type == "text_link" and entity.url not in links:
-                links.append(entity.url)
-
-        if msg.photo:
-            files.append(["photo", msg.photo[-1].file_id])
-        elif msg.document:
-            files.append(["document", msg.document.file_id])
-        elif msg.video:
-            files.append(["video", msg.video.file_id])
-
-    text = "\n".join(texts)
-    if links:
-        text += ("\n\n" if text else "") + "Ссылки:\n" + "\n".join(links)
-    return text, files
-
-
-def merge_text(old, new):
-    if old and new:
-        return old + "\n" + new
-    return old or new
-
-
-async def send_files(chat_id, files):
-    photos = [file_id for file_type, file_id in files if file_type == "photo"]
-    for i in range(0, len(photos), 10):  # в альбоме максимум 10 файлов
-        chunk = photos[i:i + 10]
-        if len(chunk) == 1:
-            await bot.send_photo(chat_id, chunk[0])
-        else:
-            await bot.send_media_group(chat_id, [InputMediaPhoto(media=f) for f in chunk])
-
-    for file_type, file_id in files:
-        if file_type == "document":
-            await bot.send_document(chat_id, file_id)
-        elif file_type == "video":
-            await bot.send_video(chat_id, file_id)
-
-
-async def notify_reviewers(text, files, homework_id):
-    for reviewer in REVIEWERS:
-        try:
-            await send_files(reviewer, files)
-            await bot.send_message(reviewer, clip(text), reply_markup=review_keyboard(homework_id))
-        except Exception:
-            log.exception("Не удалось отправить ДЗ #%s проверяющему %s", homework_id, reviewer)
-
-
-async def gather_album(message, handler):
-    """Собирает альбом в один вызов handler(messages)."""
-    group_id = message.media_group_id
-    if not group_id:
-        await handler([message])
-        return
-
-    _albums[group_id].append(message)
-    task = _album_tasks.get(group_id)
-    if task:
-        task.cancel()
-    _album_tasks[group_id] = asyncio.create_task(_flush_album(group_id, handler))
-
-
-async def _flush_album(group_id, handler):
-    try:
-        await asyncio.sleep(ALBUM_DELAY)
-    except asyncio.CancelledError:
-        return
-    messages = _albums.pop(group_id, [])
-    _album_tasks.pop(group_id, None)
-    if messages:
-        try:
-            await handler(messages)
-        except Exception:
-            log.exception("Ошибка обработки альбома %s", group_id)
+fallback_router = Router()  # подключается последним: ловит всё, что не поймали другие
 
 
 # ---------------------------------------------------------------------------
@@ -205,15 +25,23 @@ async def _flush_album(group_id, handler):
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    if is_reviewer(message.from_user.id):
-        await message.answer(
-            "Ты в режиме проверки ДЗ ✏️\n\n"
-            "/tasks — список заданий\n"
-            "/addtask Название — добавить задание\n"
-            "/cancel — сбросить текущее действие"
-            + ("\n/switch — стать учеником (тестовый режим)" if DEV_MODE else ""),
-            reply_markup=ReplyKeyboardRemove(),
-        )
+    user_id = message.from_user.id
+    if is_staff(user_id):
+        lines = []
+        if is_admin(user_id):
+            lines.append("Ты админ 📊 — кнопки внизу: сводка, ученики, выгрузка.")
+        if is_reviewer(user_id):
+            lines.append("Ты проверяешь ДЗ ✏️ — новые работы приходят сюда.")
+        lines += [
+            "",
+            "/tasks — список заданий",
+            "/addtask Название — добавить задание",
+            "/hw номер — история ДЗ",
+            "/cancel — сбросить текущее действие",
+        ]
+        if DEV_MODE and user_id in REVIEWERS + ADMINS:
+            lines.append("/switch — стать учеником (тестовый режим)")
+        await message.answer("\n".join(lines), reply_markup=staff_keyboard(user_id))
         return
     await message.answer("Выбери действие 👇", reply_markup=student_keyboard())
 
@@ -222,14 +50,14 @@ async def start(message: types.Message):
 async def switch_role(message: types.Message):
     """Только для тестов: проверяющий переключается между ролями."""
     user_id = message.from_user.id
-    if not DEV_MODE or user_id not in REVIEWERS:
+    if not DEV_MODE or user_id not in REVIEWERS + ADMINS:
         await handle_message(message)
         return
 
     await db.clear_state(user_id)
     if user_id in _acting_as_student:
         _acting_as_student.discard(user_id)
-        await message.answer("🔁 Теперь ты проверяющий", reply_markup=ReplyKeyboardRemove())
+        await message.answer("🔁 Ты снова в своей роли", reply_markup=staff_keyboard(user_id))
     else:
         _acting_as_student.add(user_id)
         await message.answer(
@@ -242,15 +70,15 @@ async def switch_role(message: types.Message):
 @dp.message(Command("cancel"))
 async def cancel(message: types.Message):
     await db.clear_state(message.from_user.id)
-    if is_reviewer(message.from_user.id):
-        await message.answer("Действие сброшено")
+    if is_staff(message.from_user.id):
+        await message.answer("Действие сброшено", reply_markup=staff_keyboard(message.from_user.id))
     else:
         await message.answer("Действие сброшено", reply_markup=student_keyboard())
 
 
 @dp.message(Command("tasks"))
 async def list_tasks(message: types.Message):
-    if not is_reviewer(message.from_user.id):
+    if not is_staff(message.from_user.id):
         return
     assignments = await db.list_assignments(active_only=False)
     if not assignments:
@@ -270,7 +98,7 @@ async def list_tasks(message: types.Message):
 
 @dp.message(Command("addtask"))
 async def add_task(message: types.Message, command: CommandObject):
-    if not is_reviewer(message.from_user.id):
+    if not is_staff(message.from_user.id):
         return
     title = (command.args or "").strip()
     if not title:
@@ -286,7 +114,7 @@ async def add_task(message: types.Message, command: CommandObject):
 
 async def start_new_homework(message: types.Message):
     user_id = message.from_user.id
-    if is_reviewer(user_id):
+    if is_staff(user_id):
         await message.answer("Ты не можешь отправлять ДЗ ❌")
         return
 
@@ -590,7 +418,7 @@ async def cancel_review(callback: types.CallbackQuery):
 # Все остальные сообщения
 # ---------------------------------------------------------------------------
 
-@dp.message()
+@fallback_router.message()
 async def handle_message(message: types.Message):
     user_id = message.from_user.id
 
@@ -617,16 +445,21 @@ async def handle_message(message: types.Message):
         _idle_albums.add(message.media_group_id)
         asyncio.get_running_loop().call_later(30, _idle_albums.discard, message.media_group_id)
 
-    if is_reviewer(user_id):
-        await message.answer("Ожидай новое ДЗ от ученика ✏️")
+    if is_staff(user_id):
+        await message.answer("Ожидай новое ДЗ от ученика ✏️", reply_markup=staff_keyboard(user_id))
     else:
         await message.answer("Нажми кнопку «📤 Отправить новое ДЗ», чтобы начать 👇",
                              reply_markup=student_keyboard())
 
 
+# порядок важен: сначала кнопки админа, потом «всё остальное»
+dp.include_router(admin.router)
+dp.include_router(fallback_router)
+
+
 async def main():
     db.init_db()
-    log.info("Проверяющие: %s", REVIEWERS)
+    log.info("Проверяющие: %s, админы: %s", REVIEWERS, ADMINS)
     await dp.start_polling(bot)
 
 

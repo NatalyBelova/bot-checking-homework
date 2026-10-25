@@ -1,0 +1,261 @@
+"""Общее для всех обработчиков: экземпляр бота, роли, клавиатуры, помощники."""
+import asyncio
+import logging
+from collections import defaultdict
+
+from aiogram import Bot, types
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
+
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
+from config import ADMINS, REVIEWERS, TIMEZONE, TOKEN
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("homework_bot")
+
+bot = Bot(token=TOKEN)
+
+BTN_NEW = "📤 Отправить новое ДЗ"
+BTN_MY = "📋 Мои ДЗ"
+
+# Состояния (хранятся в таблице user_states и переживают перезапуск бота)
+SUBMIT = "submit"  # ученик собирает отправку: data = {mode, assignment_id|homework_id, text, files}
+REVIEW = "review"  # проверяющий пишет комментарий: data = {homework_id, action, text, files}
+
+STATUS_LABELS = {
+    "new": "🕐 На проверке",
+    "revision": "🔄 На доработке",
+    "accepted": "✅ Принято",
+}
+
+ALBUM_DELAY = 0.8  # сек: Telegram присылает альбом отдельными сообщениями
+MAX_TEXT = 3500    # лимит сообщения Telegram — 4096 символов
+
+_albums = defaultdict(list)
+_album_tasks = {}
+_idle_albums = set()
+_user_locks = defaultdict(asyncio.Lock)
+_acting_as_student = set()  # DEV_MODE: проверяющие, переключившиеся в роль ученика
+
+
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
+
+def is_reviewer(user_id):
+    return user_id in REVIEWERS and user_id not in _acting_as_student
+
+
+def is_admin(user_id):
+    return user_id in ADMINS and user_id not in _acting_as_student
+
+
+def is_staff(user_id):
+    return is_reviewer(user_id) or is_admin(user_id)
+
+
+_TZ = ZoneInfo(TIMEZONE)
+
+
+def fmt_dt(dt, with_time=True):
+    """Время из БД (UTC без зоны) → местное время для отчётов."""
+    if dt is None:
+        return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TZ).strftime("%d.%m %H:%M" if with_time else "%d.%m")
+
+
+def fmt_ago(dt):
+    """«3 ч», «2 дн» — сколько прошло с момента dt."""
+    if dt is None:
+        return ""
+    from datetime import datetime
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    minutes = int((datetime.now(timezone.utc) - dt).total_seconds() // 60)
+    if minutes < 60:
+        return f"{max(minutes, 0)} мин"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} ч"
+    return f"{minutes // (24 * 60)} дн"
+
+
+def student_label(student_id, name):
+    return name or f"id:{student_id}"
+
+
+BTN_STATS = "📊 Сводка"
+BTN_PENDING = "🕐 Ждут проверки"
+BTN_STUDENTS = "👥 Ученики"
+BTN_EXPORT = "📥 Выгрузка в Excel"
+
+
+def staff_keyboard(user_id):
+    """Клавиатура админа/проверяющего. None — если кнопок не положено."""
+    if is_admin(user_id):
+        rows = [
+            [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_PENDING)],
+            [KeyboardButton(text=BTN_STUDENTS), KeyboardButton(text=BTN_EXPORT)],
+        ]
+    elif is_reviewer(user_id):
+        rows = [[KeyboardButton(text=BTN_PENDING)]]
+    else:
+        return None
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def get_user_display(user: types.User):
+    if user.username:
+        return f"@{user.username}"
+    if user.full_name:
+        return user.full_name
+    return f"id:{user.id}"
+
+
+def clip(text, limit=MAX_TEXT):
+    text = text or ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def student_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY)]],
+        resize_keyboard=True,
+    )
+
+
+def review_keyboard(homework_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
+            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}"),
+        ],
+        [InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")],
+    ])
+
+
+def submit_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_send"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send"),
+    ]])
+
+
+def review_confirm_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_review"),
+        InlineKeyboardButton(text="➕ Добавить ещё", callback_data="add_review"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_review"),
+    ]])
+
+
+def fix_keyboard(homework_id):
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"✏️ Отправить доработку по ДЗ #{homework_id}",
+                             callback_data=f"fix_{homework_id}"),
+    ]])
+
+
+def homework_title(hw):
+    title = f"ДЗ #{hw['id']}"
+    if hw.get("assignment_title"):
+        title += f" «{hw['assignment_title']}»"
+    return title
+
+
+def extract_content(messages):
+    """Текст и файлы из одного сообщения или альбома.
+
+    Ссылки, спрятанные под текстом (например «353» → задача в Jira),
+    дописываются в конец, иначе они теряются при пересылке текста.
+    """
+    texts, files, links = [], [], []
+    for msg in messages:
+        text = msg.text or msg.caption
+        if text:
+            texts.append(text)
+        for entity in (msg.entities or msg.caption_entities or []):
+            if entity.type == "text_link" and entity.url not in links:
+                links.append(entity.url)
+
+        if msg.photo:
+            files.append(["photo", msg.photo[-1].file_id])
+        elif msg.document:
+            files.append(["document", msg.document.file_id])
+        elif msg.video:
+            files.append(["video", msg.video.file_id])
+
+    text = "\n".join(texts)
+    if links:
+        text += ("\n\n" if text else "") + "Ссылки:\n" + "\n".join(links)
+    return text, files
+
+
+def merge_text(old, new):
+    if old and new:
+        return old + "\n" + new
+    return old or new
+
+
+async def send_files(chat_id, files):
+    photos = [file_id for file_type, file_id in files if file_type == "photo"]
+    for i in range(0, len(photos), 10):  # в альбоме максимум 10 файлов
+        chunk = photos[i:i + 10]
+        if len(chunk) == 1:
+            await bot.send_photo(chat_id, chunk[0])
+        else:
+            await bot.send_media_group(chat_id, [InputMediaPhoto(media=f) for f in chunk])
+
+    for file_type, file_id in files:
+        if file_type == "document":
+            await bot.send_document(chat_id, file_id)
+        elif file_type == "video":
+            await bot.send_video(chat_id, file_id)
+
+
+async def notify_reviewers(text, files, homework_id):
+    for reviewer in REVIEWERS:
+        try:
+            await send_files(reviewer, files)
+            await bot.send_message(reviewer, clip(text), reply_markup=review_keyboard(homework_id))
+        except Exception:
+            log.exception("Не удалось отправить ДЗ #%s проверяющему %s", homework_id, reviewer)
+
+
+async def gather_album(message, handler):
+    """Собирает альбом в один вызов handler(messages)."""
+    group_id = message.media_group_id
+    if not group_id:
+        await handler([message])
+        return
+
+    _albums[group_id].append(message)
+    task = _album_tasks.get(group_id)
+    if task:
+        task.cancel()
+    _album_tasks[group_id] = asyncio.create_task(_flush_album(group_id, handler))
+
+
+async def _flush_album(group_id, handler):
+    try:
+        await asyncio.sleep(ALBUM_DELAY)
+    except asyncio.CancelledError:
+        return
+    messages = _albums.pop(group_id, [])
+    _album_tasks.pop(group_id, None)
+    if messages:
+        try:
+            await handler(messages)
+        except Exception:
+            log.exception("Ошибка обработки альбома %s", group_id)
+
+
