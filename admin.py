@@ -10,7 +10,9 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 import db
 import export
 import sheets
-from config import AI_MODE
+from zoneinfo import ZoneInfo
+
+from config import AI_MODE, TIMEZONE
 from common import (
     BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
     _user_locks, bot, clip, decode_text, download_attachment, extract_content, fmt_ago, fmt_dt, homework_title,
@@ -269,7 +271,7 @@ async def export_excel(message: types.Message):
         await message.answer("Не получилось сделать выгрузку 😔 Попробуй ещё раз позже")
         return
 
-    filename = f"homeworks_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+    filename = f"homeworks_{datetime.now(ZoneInfo(TIMEZONE)).strftime('%Y-%m-%d_%H-%M')}.xlsx"
     await message.answer_document(
         BufferedInputFile(content, filename=filename),
         caption="📥 Листы: «Прогресс» (ученики × задания), «Все ДЗ», «Попытки»",

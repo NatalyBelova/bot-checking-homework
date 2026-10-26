@@ -67,14 +67,14 @@ async def _process_submission(homework_id, card_text, files):
 
 
 CHECKLIST_HINT = (
-    "Не получилось открыть твою таблицу: {reason}.\n\n"
-    "Если это Google Таблица — нажми «Настройки доступа» → «Все, у кого есть ссылка» → «Читатель» "
-    "и пришли ссылку ещё раз. Или просто пришли сюда файл .xlsx."
+    "{problem}\n\n"
+    "Пришли ссылку на таблицу с доступом «Все, у кого есть ссылка» (в Google Таблице: «Настройки доступа» → "
+    "«Все, у кого есть ссылка» → «Читатель») или просто пришли сюда файл .xlsx."
 )
 
 
 JIRA_HINT = (
-    "Не получилось найти твои баг-репорты: {reason}.\n\n"
+    "{problem}\n\n"
     "Пришли ссылки на задачи в Jira — скопируй адрес открытой задачи (вида …/browse/KAN-353) "
     "или напиши ключи задач, например: KAN-353, KAN-354."
 )
@@ -93,8 +93,10 @@ async def process_submission(homework_id, card_text, files):
                 "Проверь вручную.", files, homework_id)
             return
         if not material.jira_issues and not material.images:
-            reason = "; ".join(material.jira_problems) or "в отправке нет ссылок на задачи Jira"
-            await apply_decision(hw, "revise", JIRA_HINT.format(reason=reason), [], reviewed_by="system")
+            reason = "; ".join(material.jira_problems)
+            problem = (f"Не получилось открыть твои баг-репорты: {reason}." if reason
+                       else "В отправке нет ссылок на задачи Jira.")
+            await apply_decision(hw, "revise", JIRA_HINT.format(problem=problem), [], reviewed_by="system")
             log.info("ДЗ #%s: задачи Jira не найдены, вернул ученику (%s)", homework_id, reason)
             return
 
@@ -103,8 +105,10 @@ async def process_submission(homework_id, card_text, files):
         versions = await db.get_versions(homework_id)
         material = await ai_review.gather_material(versions[-1])
         if not material.tables and not material.images:
-            reason = "; ".join(material.problems) or "в отправке нет ссылки на таблицу или файла .xlsx"
-            await apply_decision(hw, "revise", CHECKLIST_HINT.format(reason=reason), [],
+            reason = "; ".join(material.problems)
+            problem = (f"Не получилось открыть твою таблицу: {reason}." if reason
+                       else "В отправке нет ссылки на таблицу или файла .xlsx.")
+            await apply_decision(hw, "revise", CHECKLIST_HINT.format(problem=problem), [],
                                  reviewed_by="system")
             log.info("ДЗ #%s: таблица не открылась, вернул ученику (%s)", homework_id, reason)
             return
