@@ -7,10 +7,11 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 
 import db
 import export
+import sheets
 from config import AI_MODE
 from common import (
     BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
-    _user_locks, bot, clip, download_image, extract_content, fmt_ago, fmt_dt, homework_title,
+    _user_locks, bot, clip, download_attachment, extract_content, fmt_ago, fmt_dt, homework_title,
     is_admin, is_reviewer, is_staff, log, merge_text, review_keyboard, send_files, student_label,
 )
 
@@ -34,6 +35,8 @@ def _btn(text, data):
 def _reviewer_label(reviewed_by):
     if reviewed_by == "ai":
         return "🤖 ИИ"
+    if reviewed_by == "system":
+        return "⚙️ бот (таблица не открылась)"
     if (reviewed_by or "").startswith("ai+human"):
         return "🤖 ИИ (подтвердил проверяющий)"
     return "проверяющий"
@@ -275,7 +278,7 @@ async def export_excel(message: types.Message):
 # Задания и эталоны
 # ---------------------------------------------------------------------------
 
-KIND_LABELS = {"screenshots": "скриншоты", "checklist": "чек-лист", "jira": "Jira"}
+KIND_LABELS = {"screenshots": "скриншоты", "checklist": "чек-лист (таблица)", "jira": "Jira"}
 
 
 def _has_reference(a):
@@ -338,6 +341,7 @@ async def _task_card(assignment_id):
         buttons.append([_btn("🖼 Показать картинки эталона", f"tkimg_{a['id']}")])
     buttons.append([_btn("👁 Показать ученикам" if not a["is_active"] else "🙈 Скрыть от учеников",
                          f"tktog_{a['id']}")])
+    buttons.append([_btn(f"🔁 Тип: {KIND_LABELS.get(a['kind'], a['kind'])} — сменить", f"tkkind_{a['id']}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -362,6 +366,21 @@ async def task_toggle(callback: types.CallbackQuery):
     text, keyboard = await _task_card(assignment_id)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer("Скрыто" if a["is_active"] else "Снова видно ученикам")
+
+
+@router.callback_query(F.data.startswith("tkkind_"), _staff)
+async def task_kind(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание не найдено", show_alert=True)
+        return
+    kinds = list(KIND_LABELS)
+    new_kind = kinds[(kinds.index(a["kind"]) + 1) % len(kinds)] if a["kind"] in kinds else kinds[0]
+    await db.set_assignment_kind(assignment_id, new_kind)
+    text, keyboard = await _task_card(assignment_id)
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer(f"Тип: {KIND_LABELS[new_kind]}")
 
 
 @router.callback_query(F.data.startswith("tkimg_"), _staff)
@@ -391,7 +410,8 @@ async def task_reference_start(callback: types.CallbackQuery):
         f"✏️ Эталон для «{a['title']}»\n\n"
         "Пришли критерии приёмки текстом: что должно быть в работе, что считается ошибкой, "
         "за что точно возвращать на доработку. Можно добавить эталонные скриншоты "
-        "(как выглядит правильный результат).\n\n"
+        "(как выглядит правильный результат), а для чек-листа — эталонную таблицу "
+        "файлом .xlsx или ссылкой на Google Таблицу.\n\n"
         "Можно несколькими сообщениями. Старый эталон заменится, когда нажмёшь «Сохранить»."
     )
     await callback.answer()
@@ -430,18 +450,33 @@ async def reference_save(callback: types.CallbackQuery):
         await db.clear_state(user_id)
     await callback.answer()
 
-    images, skipped = [], []
+    images, documents, skipped = [], [], []
     for file_type, file_id in data["files"]:
-        mime, content = await download_image(file_type, file_id)
-        if mime:
-            images.append((mime, content))
+        kind, meta, content = await download_attachment(file_type, file_id)
+        if kind == "image":
+            images.append((meta, content))
+        elif kind == "table":
+            documents.append((meta, content))
         else:
-            skipped.append(content)
+            skipped.append(meta)
 
-    await db.set_reference(data["assignment_id"], data.get("text", ""), images)
+    # эталонная таблица (файл или ссылка) сохраняется текстом — так её проще сравнивать
+    reference = data.get("text", "")
+    tables, problems = await sheets.collect_tables(reference, documents)
+    if tables:
+        reference += "\n\n" + sheets.describe(tables, [], "ЭТАЛОННАЯ ТАБЛИЦА")
+
+    await db.set_reference(data["assignment_id"], reference, images)
     text, keyboard = await _task_card(data["assignment_id"])
-    note = f"\n\n⚠️ Не сохранено (ИИ понимает только картинки): {', '.join(skipped)}" if skipped else ""
-    await callback.message.answer(f"💾 Эталон сохранён{note}\n\n{text}", reply_markup=keyboard)
+    notes = []
+    if tables:
+        notes.append(f"📊 Таблиц в эталоне: {len(tables)} (сохранены текстом)")
+    if problems:
+        notes.append("⚠️ Не открылись таблицы: " + "; ".join(problems))
+    if skipped:
+        notes.append("⚠️ Не сохранено (ИИ понимает только картинки и таблицы): " + ", ".join(skipped))
+    note = ("\n\n" + "\n".join(notes)) if notes else ""
+    await callback.message.answer(clip(f"💾 Эталон сохранён{note}\n\n{text}"), reply_markup=keyboard)
 
 
 @router.callback_query(F.data == "refcancel", _staff)

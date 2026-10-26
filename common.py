@@ -103,6 +103,19 @@ def student_label(student_id, name):
     return name or f"id:{student_id}"
 
 
+SUBMIT_HINTS = {
+    "screenshots": "Отправь скриншоты (можно альбомом) и, если нужно, текст 📚",
+    "checklist": ("Пришли ссылку на таблицу с чек-листом 📊\n"
+                  "Google Таблицы, Яндекс.Диск или OneDrive — с доступом «Все, у кого есть ссылка». "
+                  "Можно вместо ссылки прислать файл .xlsx."),
+    "jira": "Пришли номера задач со ссылками на Jira 🐞",
+}
+
+
+def submit_hint(kind):
+    return SUBMIT_HINTS.get(kind or "screenshots", SUBMIT_HINTS["screenshots"])
+
+
 BTN_STATS = "📊 Сводка"
 BTN_PENDING = "🕐 Ждут проверки"
 BTN_STUDENTS = "👥 Ученики"
@@ -278,28 +291,38 @@ IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
              ".webp": "image/webp", ".gif": "image/gif"}
 
 
-async def download_image(file_type, file_id):
-    """Скачивает файл из Telegram.
+TABLE_EXT = (".xlsx", ".xlsm", ".xls", ".csv")
 
-    Возвращает (mime, bytes) для картинок и (None, описание) для всего остального —
-    видео, PDF, Excel и т.п. ИИ пока смотрит только картинки.
+
+async def download_attachment(file_type, file_id):
+    """Скачивает вложение из Telegram и определяет, что это.
+
+    ('image', mime, bytes)      — картинка, её можно показать ИИ
+    ('table', filename, bytes)  — Excel/CSV, превращается в текст
+    ('other', описание, None)   — видео, PDF и прочее, ИИ не видит
     """
     if file_type == "video":
-        return None, "видео"
+        return "other", "видео", None
     try:
         tg_file = await bot.get_file(file_id)
     except Exception as e:
         log.warning("Не удалось получить файл %s: %s", file_id, e)
-        return None, "файл не удалось скачать (возможно, больше 20 МБ)"
+        return "other", "файл не удалось скачать (возможно, больше 20 МБ)", None
 
     path = tg_file.file_path or ""
     ext = os.path.splitext(path)[1].lower()
-    if file_type == "photo":
-        mime = "image/jpeg"
-    elif ext in IMAGE_EXT:
-        mime = IMAGE_EXT[ext]
-    else:
-        return None, f"файл {ext or 'без расширения'}"
+    if file_type == "photo" or ext in IMAGE_EXT:
+        buffer = await bot.download_file(path)
+        return "image", IMAGE_EXT.get(ext, "image/jpeg"), buffer.read()
+    if ext in TABLE_EXT:
+        buffer = await bot.download_file(path)
+        return "table", os.path.basename(path), buffer.read()
+    return "other", f"файл {ext or 'без расширения'}", None
 
-    buffer = await bot.download_file(path)
-    return mime, buffer.read()
+
+async def download_image(file_type, file_id):
+    """(mime, bytes) для картинок и (None, описание) для остального."""
+    kind, meta, data = await download_attachment(file_type, file_id)
+    if kind == "image":
+        return meta, data
+    return None, ("таблица " + meta) if kind == "table" else meta

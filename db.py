@@ -227,6 +227,13 @@ def set_assignment_reference(assignment_id, reference):
 
 
 @_async
+def set_assignment_kind(assignment_id, kind):
+    with _cursor() as cursor:
+        cursor.execute("UPDATE assignments SET kind=%s WHERE id=%s", (kind, assignment_id))
+        return cursor.rowcount > 0
+
+
+@_async
 def set_assignment_active(assignment_id, is_active):
     with _cursor() as cursor:
         cursor.execute(

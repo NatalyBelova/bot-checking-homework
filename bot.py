@@ -11,7 +11,7 @@ from common import (
     ALBUM_DELAY, BTN_MY, BTN_NEW, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT,
     _acting_as_student, _albums, _idle_albums, _user_locks,
     bot, clip, deny_callback, extract_content, gather_album, get_user_display,
-    homework_title, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
+    homework_title, submit_hint, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
     review_keyboard, staff_keyboard, student_keyboard, submit_keyboard,
 )
 from config import ADMINS, AI_MODE, DEV_MODE, OPENAI_MODEL, REVIEWERS
@@ -113,7 +113,7 @@ async def choose_task(callback: types.CallbackQuery):
                        {"mode": "new", "assignment_id": assignment_id, "text": "", "files": []})
     await callback.message.edit_text(
         f"Задание: «{assignment['title']}»\n\n"
-        "Отправь скриншоты, файлы или ссылку 📚\n"
+        f"{submit_hint(assignment['kind'])}\n"
         "Можно несколькими сообщениями — потом нажми «Отправить»."
     )
     await callback.answer()
@@ -133,7 +133,7 @@ async def start_fix(callback: types.CallbackQuery):
     await db.set_state(callback.from_user.id, SUBMIT,
                        {"mode": "revision", "homework_id": homework_id, "text": "", "files": []})
     await callback.message.answer(
-        f"Пришли исправления по {homework_title(hw)} — текстом, скриншотами или файлами ✏️\n"
+        f"Пришли исправления по {homework_title(hw)} ✏️\n{submit_hint(hw['assignment_kind'])}\n"
         "Можно несколькими сообщениями — потом нажми «Отправить»."
     )
     await callback.answer()

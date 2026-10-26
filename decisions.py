@@ -66,12 +66,32 @@ async def _process_submission(homework_id, card_text, files):
         await notify_reviewers(card_text, files, homework_id)
 
 
+CHECKLIST_HINT = (
+    "Не получилось открыть твою таблицу: {reason}.\n\n"
+    "Если это Google Таблица — нажми «Настройки доступа» → «Все, у кого есть ссылка» → «Читатель» "
+    "и пришли ссылку ещё раз. Или просто пришли сюда файл .xlsx."
+)
+
+
 async def process_submission(homework_id, card_text, files):
+    material = None
+    hw = await db.get_homework(homework_id)
+    if hw and hw["assignment_kind"] == "checklist":
+        # чек-лист без доступной таблицы проверять бессмысленно — сразу просим ученика поправить
+        versions = await db.get_versions(homework_id)
+        material = await ai_review.gather_material(versions[-1])
+        if not material.tables and not material.images:
+            reason = "; ".join(material.problems) or "в отправке нет ссылки на таблицу или файла .xlsx"
+            await apply_decision(hw, "revise", CHECKLIST_HINT.format(reason=reason), [],
+                                 reviewed_by="system")
+            log.info("ДЗ #%s: таблица не открылась, вернул ученику (%s)", homework_id, reason)
+            return
+
     if AI_MODE == "off":
         await notify_reviewers(card_text, files, homework_id)
         return
 
-    result = await ai_review.check_homework(homework_id)
+    result = await ai_review.check_homework(homework_id, material)
     if result is None:  # у задания нет эталона — только человек
         await notify_reviewers(card_text, files, homework_id)
         return

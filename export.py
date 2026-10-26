@@ -39,6 +39,8 @@ def _reviewer(value):
         return ""
     if value == "ai":
         return "ИИ"
+    if value == "system":
+        return "Бот (авто)"
     if value.startswith("ai+human"):
         return "ИИ + проверяющий"
     return "Проверяющий"
