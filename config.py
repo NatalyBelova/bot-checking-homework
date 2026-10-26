@@ -37,5 +37,10 @@ AI_MODE = os.getenv("AI_MODE", "suggest").lower() if OPENAI_API_KEY else "off"
 if AI_MODE not in ("off", "suggest", "auto"):
     AI_MODE = "suggest"
 
+# --- Jira (для заданий типа «Jira»): https://<домен>.atlassian.net, email и API-токен аккаунта ---
+JIRA_URL = os.getenv("JIRA_URL")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL")
+JIRA_TOKEN = os.getenv("JIRA_TOKEN")
+
 # В режиме auto: начиная с этой попытки работу смотрит человек (чтобы не крутить ученика бесконечно)
 AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "3"))

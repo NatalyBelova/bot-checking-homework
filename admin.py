@@ -38,7 +38,7 @@ def _reviewer_label(reviewed_by):
     if reviewed_by == "ai":
         return "🤖 ИИ"
     if reviewed_by == "system":
-        return "⚙️ бот (таблица не открылась)"
+        return "⚙️ бот (не открылась таблица или задачи Jira)"
     if (reviewed_by or "").startswith("ai+human"):
         return "🤖 ИИ (подтвердил проверяющий)"
     return "проверяющий"

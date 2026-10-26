@@ -73,9 +73,31 @@ CHECKLIST_HINT = (
 )
 
 
+JIRA_HINT = (
+    "Не получилось найти твои баг-репорты: {reason}.\n\n"
+    "Пришли ссылки на задачи в Jira — скопируй адрес открытой задачи (вида …/browse/KAN-353) "
+    "или напиши ключи задач, например: KAN-353, KAN-354."
+)
+
+
 async def process_submission(homework_id, card_text, files):
     material = None
     hw = await db.get_homework(homework_id)
+    if hw and hw["assignment_kind"] == "jira":
+        versions = await db.get_versions(homework_id)
+        material = await ai_review.gather_material(versions[-1], "jira")
+        if material.jira_config_problem:
+            # ученик не виноват — разбирается человек
+            await notify_reviewers(
+                f"{card_text}\n\n⚠️ Не удалось прочитать задачи из Jira: {material.jira_config_problem}. "
+                "Проверь вручную.", files, homework_id)
+            return
+        if not material.jira_issues and not material.images:
+            reason = "; ".join(material.jira_problems) or "в отправке нет ссылок на задачи Jira"
+            await apply_decision(hw, "revise", JIRA_HINT.format(reason=reason), [], reviewed_by="system")
+            log.info("ДЗ #%s: задачи Jira не найдены, вернул ученику (%s)", homework_id, reason)
+            return
+
     if hw and hw["assignment_kind"] == "checklist":
         # чек-лист без доступной таблицы проверять бессмысленно — сразу просим ученика поправить
         versions = await db.get_versions(homework_id)
