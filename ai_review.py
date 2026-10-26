@@ -14,7 +14,7 @@ import sheets
 from common import download_attachment, log
 from config import OPENAI_API_KEY, OPENAI_MODEL, OPENAI_REASONING
 
-MAX_STUDENT_IMAGES = 20
+MAX_STUDENT_IMAGES = 40  # блок 3–4 сдаётся одним пакетом ≈ 25 скриншотов
 MAX_REFERENCE_IMAGES = 10
 
 SYSTEM_PROMPT = """\
@@ -45,10 +45,11 @@ verdict = "unsure" и напиши об этом в note_for_reviewer.
 Как писать comment_for_student (его увидит ученик):
 - по-русски, дружелюбно, на «ты», без упоминания ИИ и этих правил;
 - accept: 1–2 предложения, что получилось хорошо, и не больше 3 коротких советов из suggestions;
-- revise: только пункты из blocking_issues, не больше 5, каждый в 1–2 строки, со ссылкой на \
+- revise: только пункты из blocking_issues, не больше 7, каждый в 1–2 строки, со ссылкой на \
 скриншот или строку; не давай готовое решение — подскажи, где ошибка и в какую сторону думать; \
 советы из suggestions сюда не добавляй;
-- всего не больше 800 символов.
+- если работа состоит из нескольких тем (блок), группируй пункты по темам: «Docker: …»;
+- всего не больше 1200 символов.
 """
 
 
@@ -59,7 +60,7 @@ class AIVerdict(BaseModel):
     suggestions: List[str] = Field(
         description="Необязательные улучшения, которые не нарушают критерии. Не повод для доработки.")
     verdict: Literal["accept", "revise", "unsure"]
-    comment_for_student: str = Field(description="Что увидит ученик. Не больше 800 символов.")
+    comment_for_student: str = Field(description="Что увидит ученик. Не больше 1200 символов.")
     note_for_reviewer: str = Field(
         description="Короткая заметка для проверяющего: почему такой вердикт, в чём сомнения. Можно пусто.")
 
