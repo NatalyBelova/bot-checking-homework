@@ -288,6 +288,21 @@ async def _flush_album(group_id, handler):
 
 
 
+def sniff_image(data):
+    """Настоящий MIME картинки по первым байтам или None, если это не картинка (например, HTML)."""
+    if not data:
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
              ".webp": "image/webp", ".gif": "image/gif"}
 
@@ -329,8 +344,11 @@ async def download_attachment(file_type, file_id):
     path = tg_file.file_path or ""
     ext = os.path.splitext(path)[1].lower()
     if file_type == "photo" or ext in IMAGE_EXT:
-        buffer = await bot.download_file(path)
-        return "image", IMAGE_EXT.get(ext, "image/jpeg"), buffer.read()
+        data = (await bot.download_file(path)).read()
+        mime = sniff_image(data)
+        if not mime:
+            return "other", f"картинка {ext or ''} в неподдерживаемом формате", None
+        return "image", mime, data
     if ext in TABLE_EXT:
         buffer = await bot.download_file(path)
         return "table", os.path.basename(path), buffer.read()

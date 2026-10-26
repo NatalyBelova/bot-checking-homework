@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
+from common import log, sniff_image
 from config import JIRA_EMAIL, JIRA_TOKEN, JIRA_URL
 
 MAX_ISSUES = 10
@@ -51,6 +52,7 @@ class Issue:
     url: str
     text: str
     images: List[tuple] = field(default_factory=list)  # [(mime, bytes, filename)]
+    image_errors: List[str] = field(default_factory=list)  # вложения-картинки, которые не скачались
 
 
 def enabled():
@@ -187,9 +189,19 @@ async def _get_json(session, url, params=None):
         return await response.json()
 
 
+def _direct_attachment_url(url):
+    """Jira по умолчанию отвечает редиректом на api.media.atlassian.com, а при переходе на другой
+    домен авторизация теряется и вместо файла приходит страница. redirect=false отдаёт файл сразу."""
+    if "/attachment/content/" in url and "redirect=" not in url:
+        return url + ("&" if "?" in url else "?") + "redirect=false"
+    return url
+
+
 async def _download(session, url):
+    url = _direct_attachment_url(url)
     async with session.get(url) as response:
         if response.status >= 400:
+            log.warning("Jira: вложение %s не скачалось, статус %s", url, response.status)
             return None
         data = await response.content.read(MAX_IMAGE_BYTES + 1)
         return data if len(data) <= MAX_IMAGE_BYTES else None
@@ -212,8 +224,11 @@ async def fetch_issue(session, key):
         mime = a.get("mimeType") or ""
         if mime.startswith("image/") and a.get("content") and (a.get("size") or 0) <= MAX_IMAGE_BYTES:
             content = await _download(session, a["content"])
-            if content:
-                issue.images.append((mime, content, a.get("filename") or "image"))
+            real_mime = sniff_image(content)
+            if real_mime:
+                issue.images.append((real_mime, content, a.get("filename") or "image"))
+            else:
+                issue.image_errors.append(a.get("filename") or "image")
     return issue
 
 

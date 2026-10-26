@@ -124,7 +124,8 @@ async def process_submission(homework_id, card_text, files):
 
     if result.error:
         await notify_reviewers(
-            f"{card_text}\n\n⚠️ ИИ не смог проверить эту работу, нужна ручная проверка.",
+            f"{card_text}\n\n⚠️ ИИ не смог проверить эту работу, нужна ручная проверка.\n"
+            f"Причина: {result.error[:300]}",
             files, homework_id)
         return
 
