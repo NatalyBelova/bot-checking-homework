@@ -18,6 +18,7 @@ from config import ADMINS, AI_MODE, DEV_MODE, OPENAI_MODEL, REVIEWERS
 
 dp = Dispatcher()
 fallback_router = Router()  # подключается последним: ловит всё, что не поймали другие
+ADMIN_ONLY_COMMANDS = {"/seed", "/stats", "/export"}
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +456,12 @@ async def handle_message(message: types.Message):
         _idle_albums.add(message.media_group_id)
         asyncio.get_running_loop().call_later(30, _idle_albums.discard, message.media_group_id)
 
+    command = (message.text or "").split()[0].split("@")[0].lower() if (message.text or "").startswith("/") else ""
+    if command in ADMIN_ONLY_COMMANDS and is_staff(user_id) and not is_admin(user_id):
+        await message.answer(
+            f"Команда {command} доступна только админам. Админы задаются переменной ADMINS в Railway "
+            f"(твой ID: {user_id}).")
+        return
     if is_staff(user_id):
         await message.answer("Ожидай новое ДЗ от ученика ✏️", reply_markup=staff_keyboard(user_id))
     else:
