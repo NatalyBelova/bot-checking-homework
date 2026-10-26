@@ -288,6 +288,21 @@ async def _flush_album(group_id, handler):
 
 
 
+async def read_limited(response, limit):
+    """Читает тело ответа aiohttp целиком, но не больше limit+1 байт.
+
+    Важно: response.content.read(n) возвращает только уже пришедший кусок, а не n байт —
+    из-за этого большие файлы раньше обрезались.
+    """
+    chunks, size = [], 0
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            break
+    return b"".join(chunks)
+
+
 def sniff_image(data):
     """Настоящий MIME картинки по первым байтам или None, если это не картинка (например, HTML)."""
     if not data:

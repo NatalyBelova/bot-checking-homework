@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
-from common import log, sniff_image
+from common import log, read_limited, sniff_image
 from config import JIRA_EMAIL, JIRA_TOKEN, JIRA_URL
 
 MAX_ISSUES = 10
@@ -203,7 +203,7 @@ async def _download(session, url):
         if response.status >= 400:
             log.warning("Jira: вложение %s не скачалось, статус %s", url, response.status)
             return None
-        data = await response.content.read(MAX_IMAGE_BYTES + 1)
+        data = await read_limited(response, MAX_IMAGE_BYTES)
         return data if len(data) <= MAX_IMAGE_BYTES else None
 
 

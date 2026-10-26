@@ -261,7 +261,19 @@ async def check_homework(homework_id, material=None):
         if material is None:
             material = await gather_material(versions[-1], assignment["kind"])
         content = await build_input(hw, assignment, versions, material)
-        verdict, tokens_in, tokens_out = await call_model(content)
+        try:
+            verdict, tokens_in, tokens_out = await call_model(content)
+        except Exception as e:
+            if "image" not in str(e).lower():
+                raise
+            # OpenAI отклонил какую-то картинку — проверяем без картинок, чем не проверить вовсе
+            log.warning("ДЗ #%s: OpenAI отклонил картинку (%s), повторяю без картинок", homework_id, e)
+            content = [p for p in content if p.get("type") != "input_image"]
+            content.append(_text_part(
+                "Картинки к этой работе (скриншоты ученика и вложения) не удалось передать тебе. "
+                "Оцени то, что видно по тексту; если без картинок вердикт вынести нельзя — верни unsure "
+                "и напиши об этом в note_for_reviewer."))
+            verdict, tokens_in, tokens_out = await call_model(content)
         if verdict is None:
             raise ValueError("модель не вернула ответ в нужном формате")
     except Exception as e:

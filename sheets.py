@@ -19,6 +19,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import aiohttp
 from openpyxl import load_workbook
 
+from common import read_limited
+
 MAX_DOWNLOAD = 15 * 1024 * 1024   # 15 МБ
 MAX_ROWS_PER_SHEET = 400
 MAX_CELL = 200
@@ -100,7 +102,7 @@ async def _download(session, url):
             raise TableError("файл не найден")
         if response.status >= 400:
             raise TableError(f"сервер ответил ошибкой {response.status}")
-        data = await response.content.read(MAX_DOWNLOAD + 1)
+        data = await read_limited(response, MAX_DOWNLOAD)
         if len(data) > MAX_DOWNLOAD:
             raise TableError("файл больше 15 МБ")
         return data, response.headers.get("Content-Type", ""), str(response.url)
