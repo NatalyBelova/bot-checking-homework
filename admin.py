@@ -346,6 +346,7 @@ async def _task_card(assignment_id):
     buttons.append([_btn("👁 Показать ученикам" if not a["is_active"] else "🙈 Скрыть от учеников",
                          f"tktog_{a['id']}")])
     buttons.append([_btn(f"🔁 Тип: {KIND_LABELS.get(a['kind'], a['kind'])} — сменить", f"tkkind_{a['id']}")])
+    buttons.append([_btn("🗑 Удалить задание", f"tkdel_{a['id']}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -370,6 +371,48 @@ async def task_toggle(callback: types.CallbackQuery):
     text, keyboard = await _task_card(assignment_id)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer("Скрыто" if a["is_active"] else "Снова видно ученикам")
+
+
+@router.callback_query(F.data.startswith("tkdel_"), _staff)
+async def task_delete_ask(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание уже удалено", show_alert=True)
+        return
+    count = await db.count_homeworks_for_assignment(assignment_id)
+    if count:
+        await callback.answer(
+            f"По заданию уже сдано ДЗ: {count}. Удалить нельзя — пропадёт история учеников. "
+            "Скрой его от учеников кнопкой «🙈 Скрыть».", show_alert=True)
+        return
+    await callback.message.answer(
+        f"Удалить задание #{a['id']} «{a['title']}» вместе с эталоном? Это нельзя отменить.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            _btn("🗑 Да, удалить", f"tkdelok_{a['id']}"), _btn("Отмена", "tkdelno")]]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tkdelok_"), _staff)
+async def task_delete(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    await callback.message.edit_reply_markup(reply_markup=None)
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание уже удалено", show_alert=True)
+        return
+    if not await db.delete_assignment(assignment_id):
+        await callback.answer("По заданию успели сдать ДЗ — удалить нельзя, только скрыть", show_alert=True)
+        return
+    await callback.message.answer(f"🗑 Задание «{a['title']}» удалено")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tkdelno", _staff)
+async def task_delete_cancel(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Не удаляем")
 
 
 @router.callback_query(F.data.startswith("tkkind_"), _staff)

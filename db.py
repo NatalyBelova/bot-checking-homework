@@ -227,6 +227,27 @@ def set_assignment_reference(assignment_id, reference):
 
 
 @_async
+def count_homeworks_for_assignment(assignment_id):
+    with _cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM homeworks WHERE assignment_id=%s", (assignment_id,))
+        return cursor.fetchone()[0]
+
+
+@_async
+def delete_assignment(assignment_id):
+    """Удаляет задание, только если по нему нет ДЗ. Картинки эталона удаляются каскадом."""
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            DELETE FROM assignments a
+            WHERE a.id=%s AND NOT EXISTS (SELECT 1 FROM homeworks h WHERE h.assignment_id = a.id)
+            """,
+            (assignment_id,),
+        )
+        return cursor.rowcount > 0
+
+
+@_async
 def get_assignment_by_title(title):
     with _cursor(dict_rows=True) as cursor:
         cursor.execute(
