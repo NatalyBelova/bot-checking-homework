@@ -11,7 +11,7 @@ import sheets
 from config import AI_MODE
 from common import (
     BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
-    _user_locks, bot, clip, download_attachment, extract_content, fmt_ago, fmt_dt, homework_title,
+    _user_locks, bot, clip, decode_text, download_attachment, extract_content, fmt_ago, fmt_dt, homework_title,
     is_admin, is_reviewer, is_staff, log, merge_text, review_keyboard, send_files, student_label,
 )
 
@@ -413,7 +413,7 @@ async def task_reference_start(callback: types.CallbackQuery):
         "Пришли критерии приёмки текстом: что должно быть в работе, что считается ошибкой, "
         "за что точно возвращать на доработку. Можно добавить эталонные скриншоты "
         "(как выглядит правильный результат), а для чек-листа — эталонную таблицу "
-        "файлом .xlsx или ссылкой на Google Таблицу.\n\n"
+        "файлом .xlsx или ссылкой на Google Таблицу. Длинные критерии удобно прислать файлом .txt.\n\n"
         "Можно несколькими сообщениями. Старый эталон заменится, когда нажмёшь «Сохранить»."
     )
     await callback.answer()
@@ -452,18 +452,21 @@ async def reference_save(callback: types.CallbackQuery):
         await db.clear_state(user_id)
     await callback.answer()
 
-    images, documents, skipped = [], [], []
+    images, documents, texts, skipped = [], [], [], []
     for file_type, file_id in data["files"]:
         kind, meta, content = await download_attachment(file_type, file_id)
         if kind == "image":
             images.append((meta, content))
         elif kind == "table":
             documents.append((meta, content))
+        elif kind == "text":
+            texts.append(decode_text(content))
         else:
             skipped.append(meta)
 
     # эталонная таблица (файл или ссылка) сохраняется текстом — так её проще сравнивать
-    reference = data.get("text", "")
+    # критерии можно прислать и файлом .txt — длинный текст не влезает в одно сообщение Telegram
+    reference = "\n\n".join(x for x in [data.get("text", "")] + texts if x)
     tables, problems = await sheets.collect_tables(reference, documents)
     if tables:
         reference += "\n\n" + sheets.describe(tables, [], "ЭТАЛОННАЯ ТАБЛИЦА")
@@ -471,12 +474,14 @@ async def reference_save(callback: types.CallbackQuery):
     await db.set_reference(data["assignment_id"], reference, images)
     text, keyboard = await _task_card(data["assignment_id"])
     notes = []
+    if texts:
+        notes.append(f"📄 Текстовых файлов в эталоне: {len(texts)}")
     if tables:
         notes.append(f"📊 Таблиц в эталоне: {len(tables)} (сохранены текстом)")
     if problems:
         notes.append("⚠️ Не открылись таблицы: " + "; ".join(problems))
     if skipped:
-        notes.append("⚠️ Не сохранено (ИИ понимает только картинки и таблицы): " + ", ".join(skipped))
+        notes.append("⚠️ Не сохранено (ИИ понимает картинки, таблицы и текстовые файлы): " + ", ".join(skipped))
     note = ("\n\n" + "\n".join(notes)) if notes else ""
     await callback.message.answer(clip(f"💾 Эталон сохранён{note}\n\n{text}"), reply_markup=keyboard)
 

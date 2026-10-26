@@ -292,6 +292,21 @@ IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 
 
 TABLE_EXT = (".xlsx", ".xlsm", ".xls", ".csv")
+TEXT_EXT = (".txt", ".md", ".log", ".json", ".sql", ".yml", ".yaml", ".xml")
+MAX_TEXT_FILE = 20_000  # символов из одного текстового файла
+
+
+def decode_text(data):
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = data.decode("utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").strip()
+    return text if len(text) <= MAX_TEXT_FILE else text[:MAX_TEXT_FILE] + "\n… файл обрезан"
 
 
 async def download_attachment(file_type, file_id):
@@ -299,6 +314,7 @@ async def download_attachment(file_type, file_id):
 
     ('image', mime, bytes)      — картинка, её можно показать ИИ
     ('table', filename, bytes)  — Excel/CSV, превращается в текст
+    ('text', filename, bytes)   — .txt/.md/.log/… — читается как текст
     ('other', описание, None)   — видео, PDF и прочее, ИИ не видит
     """
     if file_type == "video":
@@ -317,6 +333,9 @@ async def download_attachment(file_type, file_id):
     if ext in TABLE_EXT:
         buffer = await bot.download_file(path)
         return "table", os.path.basename(path), buffer.read()
+    if ext in TEXT_EXT:
+        buffer = await bot.download_file(path)
+        return "text", os.path.basename(path), buffer.read()
     return "other", f"файл {ext or 'без расширения'}", None
 
 
@@ -325,4 +344,4 @@ async def download_image(file_type, file_id):
     kind, meta, data = await download_attachment(file_type, file_id)
     if kind == "image":
         return meta, data
-    return None, ("таблица " + meta) if kind == "table" else meta
+    return None, (f"{'таблица' if kind == 'table' else 'текстовый файл'} {meta}") if kind in ("table", "text") else meta
