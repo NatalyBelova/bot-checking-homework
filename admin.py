@@ -382,9 +382,27 @@ async def task_delete_ask(callback: types.CallbackQuery):
         return
     count = await db.count_homeworks_for_assignment(assignment_id)
     if count:
-        await callback.answer(
-            f"По заданию уже сдано ДЗ: {count}. Удалить нельзя — пропадёт история учеников. "
-            "Скрой его от учеников кнопкой «🙈 Скрыть».", show_alert=True)
+        if not is_admin(callback.from_user.id):
+            await callback.answer(
+                f"По заданию уже сдано ДЗ: {count}. Удалить его может только админ. "
+                "Можно скрыть от учеников кнопкой «🙈 Скрыть».", show_alert=True)
+            return
+        authors = await db.homework_authors_for_assignment(assignment_id)
+        only_me = all(sid == callback.from_user.id for sid, _, _ in authors)
+        who = "\n".join(f"• {name or f'id:{sid}'}{' (это ты)' if sid == callback.from_user.id else ''} — {n} ДЗ"
+                        for sid, name, n in authors[:15])
+        warning = ("Все эти ДЗ — твои тестовые." if only_me
+                   else "⚠️ Среди них есть ДЗ других людей — их история пропадёт безвозвратно. "
+                        "Если это настоящие ученики, лучше просто скрыть задание.")
+        await callback.message.answer(
+            f"По заданию #{a['id']} «{a['title']}» сдано ДЗ: {count}\n{who}\n\n{warning}\n\n"
+            "Удалить задание вместе со всеми этими ДЗ (попытки, файлы, проверки ИИ)? Это нельзя отменить.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [_btn(f"🗑 Удалить вместе с ДЗ ({count})", f"tkdelall_{a['id']}")],
+                [_btn("🙈 Лучше скрыть", f"tktog_{a['id']}"), _btn("Отмена", "tkdelno")],
+            ]),
+        )
+        await callback.answer()
         return
     await callback.message.answer(
         f"Удалить задание #{a['id']} «{a['title']}» вместе с эталоном? Это нельзя отменить.",
@@ -406,6 +424,22 @@ async def task_delete(callback: types.CallbackQuery):
         await callback.answer("По заданию успели сдать ДЗ — удалить нельзя, только скрыть", show_alert=True)
         return
     await callback.message.answer(f"🗑 Задание «{a['title']}» удалено")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tkdelall_"), _admin)
+async def task_delete_with_homeworks(callback: types.CallbackQuery):
+    assignment_id = int(callback.data.split("_")[1])
+    await callback.message.edit_reply_markup(reply_markup=None)
+    a = await db.get_assignment(assignment_id)
+    if not a:
+        await callback.answer("Задание уже удалено", show_alert=True)
+        return
+    count = await db.count_homeworks_for_assignment(assignment_id)
+    await db.delete_assignment(assignment_id, with_homeworks=True)
+    log.info("Админ %s удалил задание #%s «%s» вместе с %s ДЗ",
+             callback.from_user.id, assignment_id, a["title"], count)
+    await callback.message.answer(f"🗑 Задание «{a['title']}» удалено вместе с ДЗ: {count}")
     await callback.answer()
 
 

@@ -234,9 +234,19 @@ def count_homeworks_for_assignment(assignment_id):
 
 
 @_async
-def delete_assignment(assignment_id):
-    """Удаляет задание, только если по нему нет ДЗ. Картинки эталона удаляются каскадом."""
+def delete_assignment(assignment_id, with_homeworks=False):
+    """Удаляет задание. Без with_homeworks — только если по нему нет ДЗ.
+
+    С with_homeworks удаляет и все ДЗ задания: попытки, файлы, проверки ИИ.
+    """
     with _cursor() as cursor:
+        if with_homeworks:
+            cursor.execute("SELECT id FROM homeworks WHERE assignment_id=%s", (assignment_id,))
+            ids = [row[0] for row in cursor.fetchall()]
+            if ids:
+                # version_files удаляются каскадом вместе с versions, ai_reviews — вместе с homeworks
+                cursor.execute("DELETE FROM versions WHERE homework_id = ANY(%s)", (ids,))
+                cursor.execute("DELETE FROM homeworks WHERE id = ANY(%s)", (ids,))
         cursor.execute(
             """
             DELETE FROM assignments a
@@ -245,6 +255,21 @@ def delete_assignment(assignment_id):
             (assignment_id,),
         )
         return cursor.rowcount > 0
+
+
+@_async
+def homework_authors_for_assignment(assignment_id):
+    """[(student_id, имя, сколько ДЗ)] по заданию."""
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT student_id, MAX(student_name), COUNT(*)
+            FROM homeworks WHERE assignment_id=%s
+            GROUP BY student_id ORDER BY COUNT(*) DESC
+            """,
+            (assignment_id,),
+        )
+        return cursor.fetchall()
 
 
 @_async
