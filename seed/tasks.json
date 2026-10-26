@@ -1,0 +1,22 @@
+[
+  {
+    "title": "Блок 1–2: DevTools, API, Charles",
+    "kind": "screenshots",
+    "reference_file": "block_1_2.txt"
+  },
+  {
+    "title": "Блок 3–4: Git, CI/CD, Kibana/Grafana, Linux, Kafka, Docker, SQL, DBeaver",
+    "kind": "screenshots",
+    "reference_file": "block_3_4.txt"
+  },
+  {
+    "title": "Решение практических задач (чек-лист)",
+    "kind": "checklist",
+    "reference_file": null
+  },
+  {
+    "title": "Блок 5: баг-репорты в Jira",
+    "kind": "jira",
+    "reference_file": "block_5_jira.txt"
+  }
+]

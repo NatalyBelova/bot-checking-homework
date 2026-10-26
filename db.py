@@ -227,6 +227,16 @@ def set_assignment_reference(assignment_id, reference):
 
 
 @_async
+def get_assignment_by_title(title):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            "SELECT id, title, kind, reference, is_active FROM assignments WHERE title=%s ORDER BY id LIMIT 1",
+            (title,),
+        )
+        return cursor.fetchone()
+
+
+@_async
 def set_assignment_kind(assignment_id, kind):
     with _cursor() as cursor:
         cursor.execute("UPDATE assignments SET kind=%s WHERE id=%s", (kind, assignment_id))

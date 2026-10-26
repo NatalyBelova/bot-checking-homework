@@ -1,4 +1,6 @@
 """Отслеживание ДЗ: сводка, очередь на проверку, ученики, история ДЗ, выгрузка."""
+import json
+import os
 from datetime import datetime
 
 from aiogram import F, Router, types
@@ -565,3 +567,114 @@ async def task_reference_file(callback: types.CallbackQuery):
         BufferedInputFile(a["reference"].encode("utf-8"), filename=f"etalon_{a['id']}.txt"),
         caption=f"📄 Эталон «{a['title']}» целиком",
     )
+
+
+# ---------------------------------------------------------------------------
+# Загрузка заданий и эталонов из репозитория (папка seed/)
+# ---------------------------------------------------------------------------
+
+SEED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed")
+
+
+def _load_seed():
+    """[(title, kind, reference|None)] из seed/tasks.json. Бросает понятную ошибку."""
+    path = os.path.join(SEED_DIR, "tasks.json")
+    with open(path, encoding="utf-8") as f:
+        items = json.load(f)
+    result = []
+    for item in items:
+        reference = None
+        if item.get("reference_file"):
+            with open(os.path.join(SEED_DIR, item["reference_file"]), encoding="utf-8") as f:
+                reference = f.read().strip()
+        kind = item.get("kind", "screenshots")
+        if kind not in KIND_LABELS:
+            raise ValueError(f"неизвестный тип «{kind}» у задания «{item['title']}»")
+        result.append((item["title"].strip(), kind, reference))
+    return result
+
+
+async def _seed_plan():
+    seed = _load_seed()
+    plan = []  # (action, title, kind, reference, existing)
+    for title, kind, reference in seed:
+        existing = await db.get_assignment_by_title(title)
+        if not existing:
+            plan.append(("create", title, kind, reference, None))
+            continue
+        changes = []
+        if existing["kind"] != kind:
+            changes.append("тип")
+        if reference is not None and (existing["reference"] or "").strip() != reference:
+            changes.append("эталон")
+        if not existing["is_active"]:
+            changes.append("видимость")
+        plan.append(("update" if changes else "same", title, kind, reference, existing, changes))
+    titles = {p[1] for p in plan}
+    others = [a for a in await db.list_assignments(active_only=False) if a["title"] not in titles and a["is_active"]]
+    return plan, others
+
+
+@router.message(Command("seed"), _admin)
+async def seed_preview(message: types.Message):
+    try:
+        plan, others = await _seed_plan()
+    except (OSError, ValueError, KeyError) as e:
+        await message.answer(f"Не получилось прочитать seed/tasks.json: {e}")
+        return
+
+    lines = ["📦 Задания из репозитория:\n"]
+    for p in plan:
+        action, title, kind = p[0], p[1], p[2]
+        ref = "с эталоном" if p[3] else "без эталона"
+        if action == "create":
+            lines.append(f"🆕 создать: {title} [{KIND_LABELS[kind]}, {ref}]")
+        elif action == "update":
+            lines.append(f"✏️ обновить ({', '.join(p[5])}): {title}")
+        else:
+            lines.append(f"✅ без изменений: {title}")
+    if others:
+        lines += ["", "Другие задания, которые сейчас видят ученики:"]
+        lines += [f"• #{a['id']} {a['title']}" for a in others]
+
+    buttons = []
+    if any(p[0] != "same" for p in plan):
+        buttons.append([_btn("📥 Загрузить", "seedok")])
+    if others:
+        buttons.append([_btn(f"🙈 Скрыть другие ({len(others)})", "seedhide")])
+    if not buttons:
+        lines.append("\nВсё уже загружено 👍")
+    await message.answer(clip("\n".join(lines)),
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None)
+
+
+@router.callback_query(F.data == "seedok", _admin)
+async def seed_apply(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    plan, _ = await _seed_plan()
+    created = updated = 0
+    for p in plan:
+        action, title, kind, reference = p[0], p[1], p[2], p[3]
+        if action == "create":
+            await db.add_assignment(title, kind=kind, reference=reference)
+            created += 1
+        elif action == "update":
+            existing = p[4]
+            await db.set_assignment_kind(existing["id"], kind)
+            if reference is not None:
+                await db.set_assignment_reference(existing["id"], reference)
+            await db.set_assignment_active(existing["id"], True)
+            updated += 1
+    await callback.message.answer(f"📥 Готово: создано {created}, обновлено {updated}. Подробно — /alltasks")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "seedhide", _admin)
+async def seed_hide_others(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    _, others = await _seed_plan()
+    for a in others:
+        await db.set_assignment_active(a["id"], False)
+    await callback.message.answer(
+        f"🙈 Скрыто от учеников: {len(others)}. Вернуть можно в /tasks → задание → «Показать ученикам»")
+    await callback.answer()
