@@ -339,6 +339,8 @@ async def _task_card(assignment_id):
                      f"tkref_{a['id']}")]]
     if a["ref_files"]:
         buttons.append([_btn("🖼 Показать картинки эталона", f"tkimg_{a['id']}")])
+    if a["reference"] and len(a["reference"]) > 2500:
+        buttons.append([_btn("📄 Эталон целиком файлом", f"tktxt_{a['id']}")])
     buttons.append([_btn("👁 Показать ученикам" if not a["is_active"] else "🙈 Скрыть от учеников",
                          f"tktog_{a['id']}")])
     buttons.append([_btn(f"🔁 Тип: {KIND_LABELS.get(a['kind'], a['kind'])} — сменить", f"tkkind_{a['id']}")])
@@ -485,3 +487,76 @@ async def reference_cancel(callback: types.CallbackQuery):
     await db.clear_state(callback.from_user.id)
     await callback.message.answer("Отменено, эталон не изменён")
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Все задания со всей информацией
+# ---------------------------------------------------------------------------
+
+REF_PREVIEW = 3000
+
+
+@router.message(Command("alltasks"), _staff)
+async def all_tasks(message: types.Message):
+    assignments = await db.list_assignments(active_only=False)
+    if not assignments:
+        await message.answer("Заданий пока нет. Добавь: /addtask Название")
+        return
+
+    stats = {s["id"]: s for s in await db.stats_by_assignment()}
+    with_ref = sum(1 for a in assignments if _has_reference(a))
+    visible = sum(1 for a in assignments if a["is_active"])
+    ai_mode = {"off": "выключена", "suggest": "ИИ предлагает, человек подтверждает",
+               "auto": "ИИ решает сам, спорное — человеку"}[AI_MODE]
+    await message.answer(
+        f"📚 Заданий: {len(assignments)} · с эталоном: {with_ref} · видно ученикам: {visible}\n"
+        f"🤖 ИИ-проверка: {ai_mode}"
+    )
+
+    for a in assignments:
+        st = stats.get(a["id"]) or {"total": 0, "accepted": 0, "revision": 0, "pending": 0}
+        if AI_MODE == "off":
+            ai = "🤖 ИИ выключен — проверяет человек"
+        elif _has_reference(a):
+            ai = "🤖 ИИ проверяет по эталону"
+        else:
+            ai = "⚠️ Нет эталона — ИИ не проверяет, только человек"
+
+        lines = [
+            f"📚 #{a['id']} {a['title']}",
+            f"Тип: {KIND_LABELS.get(a['kind'], a['kind'])} · "
+            + ("👁 видно ученикам" if a["is_active"] else "🙈 скрыто от учеников"),
+            ai,
+            f"ДЗ: всего {st['total']} · ✅ {st['accepted']} · 🔄 {st['revision']} · 🕐 {st['pending']}",
+        ]
+        if a["reference"]:
+            lines += ["", "Эталон и критерии:", clip(a["reference"], REF_PREVIEW)]
+        if a["ref_files"]:
+            lines.append(f"\n🖼 Картинок эталона: {a['ref_files']}")
+
+        buttons = [[_btn("✏️ Изменить эталон" if _has_reference(a) else "✏️ Задать эталон",
+                         f"tkref_{a['id']}")]]
+        extra = []
+        if a["ref_files"]:
+            extra.append(_btn("🖼 Картинки", f"tkimg_{a['id']}"))
+        if a["reference"] and len(a["reference"]) > REF_PREVIEW:
+            extra.append(_btn("📄 Эталон целиком", f"tktxt_{a['id']}"))
+        if extra:
+            buttons.append(extra)
+        buttons.append([_btn("⚙️ Тип / видимость", f"tk_{a['id']}")])
+
+        await message.answer(clip("\n".join(lines)),
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(F.data.startswith("tktxt_"), _staff)
+async def task_reference_file(callback: types.CallbackQuery):
+    a = await db.get_assignment(int(callback.data.split("_")[1]))
+    if not a or not a["reference"]:
+        await callback.answer("Эталона нет", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer_document(
+        BufferedInputFile(a["reference"].encode("utf-8"), filename=f"etalon_{a['id']}.txt"),
+        caption=f"📄 Эталон «{a['title']}» целиком",
+    )
