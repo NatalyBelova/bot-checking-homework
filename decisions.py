@@ -116,6 +116,8 @@ async def process_submission(homework_id, card_text, files):
     lines = [card_text, "", f"🤖 ИИ {VERDICT_LABELS.get(result.verdict, result.verdict)}"]
     if AI_MODE == "auto" and too_many_attempts:
         lines.append(f"Это уже попытка №{hw['current_version']} — дальше решает человек.")
+    if result.verdict == "revise" and result.issues:
+        lines += ["", "Нарушения критериев:"] + [f"• {i}" for i in result.issues[:7]]
     if result.comment:
         lines += ["", "Комментарий для ученика:", result.comment]
     if result.note:

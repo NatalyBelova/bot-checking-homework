@@ -27,6 +27,8 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 # --- ИИ-проверка ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+# Глубина рассуждения для моделей gpt-5 / o-серии: minimal | low | medium | high
+OPENAI_REASONING = os.getenv("OPENAI_REASONING", "medium").lower()
 
 # off     — ИИ не используется
 # suggest — ИИ предлагает решение, проверяющий подтверждает (по умолчанию)
