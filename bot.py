@@ -484,6 +484,7 @@ async def main():
     db.init_db()
     log.info("Проверяющие: %s, админы: %s", REVIEWERS, ADMINS)
     log.info("ИИ-проверка: %s%s", AI_MODE, f" ({OPENAI_MODEL})" if AI_MODE != "off" else "")
+    asyncio.create_task(decisions.recover_unfinished())
     await dp.start_polling(bot)
 
 

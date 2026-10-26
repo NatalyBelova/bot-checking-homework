@@ -159,3 +159,29 @@ async def process_submission(homework_id, card_text, files):
                                   callback_data=f"aiedit_{result.review_id}")],
         ]
     await notify_reviewers("\n".join(lines), files, homework_id, extra_rows=extra)
+
+
+RECOVERY_DELAY = 180  # сек после старта: старый контейнер при деплое успевает доделать свои проверки
+
+
+async def recover_unfinished(delay=RECOVERY_DELAY):
+    """Повторяет ИИ-проверки, прерванные перезапуском бота (деплой, рестарт)."""
+    if AI_MODE == "off":
+        return
+    await asyncio.sleep(delay)
+    try:
+        homework_ids = await db.unfinished_ai_checks()
+    except Exception:
+        log.exception("Не удалось найти прерванные проверки")
+        return
+    for homework_id in homework_ids:
+        hw = await db.get_homework(homework_id)
+        versions = await db.get_versions(homework_id)
+        if not hw or not versions:
+            continue
+        v = versions[-1]
+        who = hw["student_name"] or f"id:{hw['student_id']}"
+        header = (f"♻️ {homework_title(hw)} от {who} (попытка {v['version_num']}) — "
+                  "проверка прервалась при перезапуске бота, проверяю заново")
+        log.info("Восстанавливаю проверку ДЗ #%s", homework_id)
+        start_processing(homework_id, f"{header}\n\n{v['text'] or ''}".strip(), v["files"])

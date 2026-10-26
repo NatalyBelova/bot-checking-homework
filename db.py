@@ -751,3 +751,31 @@ def ai_stats():
             """
         )
         return cursor.fetchone()
+
+
+@_async
+def unfinished_ai_checks(min_age_minutes=2, max_age_hours=24):
+    """ДЗ на проверке, у последней попытки которых нет результата ИИ (проверка прервалась перезапуском).
+
+    Только задания с эталоном — без эталона ИИ не вызывается, и карточка уходит сразу.
+    """
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            """
+            SELECT h.id AS homework_id
+            FROM homeworks h
+            JOIN assignments a ON a.id = h.assignment_id
+            JOIN LATERAL (
+                SELECT v.id, v.created_at FROM versions v
+                WHERE v.homework_id = h.id ORDER BY v.id DESC LIMIT 1
+            ) lv ON TRUE
+            WHERE h.status = 'new'
+              AND (a.reference IS NOT NULL OR EXISTS (SELECT 1 FROM assignment_files f WHERE f.assignment_id = a.id))
+              AND lv.created_at < NOW() - make_interval(mins => %s)
+              AND lv.created_at > NOW() - make_interval(hours => %s)
+              AND NOT EXISTS (SELECT 1 FROM ai_reviews r WHERE r.version_id = lv.id)
+            ORDER BY h.id
+            """,
+            (min_age_minutes, max_age_hours),
+        )
+        return [row["homework_id"] for row in cursor.fetchall()]
