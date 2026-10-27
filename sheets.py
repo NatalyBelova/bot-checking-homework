@@ -24,7 +24,7 @@ from common import read_limited
 MAX_DOWNLOAD = 15 * 1024 * 1024   # 15 МБ
 MAX_ROWS_PER_SHEET = 400
 MAX_CELL = 200
-MAX_TOTAL_CHARS = 40_000          # ≈ 12 тыс. токенов — по цене это ещё центы
+MAX_TOTAL_CHARS = 60_000          # ≈ 18 тыс. токенов (5 листов задач) — по цене это ещё центы
 
 URL_RE = re.compile(r"https?://[^\s<>\"'«»)\]]+")
 SPREADSHEET_EXT = (".xlsx", ".xlsm", ".csv")

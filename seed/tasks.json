@@ -12,7 +12,10 @@
   {
     "title": "Решение практических задач (чек-лист)",
     "kind": "checklist",
-    "reference_file": null
+    "reference_file": "checklist.txt",
+    "reference_tables": [
+      "https://docs.google.com/spreadsheets/d/1fcHKy0FXyu_PNnB18MIBDsPLX1BH7bBQ/edit"
+    ]
   },
   {
     "title": "Блок 5: баг-репорты в Jira",

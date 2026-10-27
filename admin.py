@@ -550,7 +550,7 @@ async def reference_save(callback: types.CallbackQuery):
     reference = "\n\n".join(x for x in [data.get("text", "")] + texts if x)
     tables, problems = await sheets.collect_tables(reference, documents)
     if tables:
-        reference += "\n\n" + sheets.describe(tables, [], "ЭТАЛОННАЯ ТАБЛИЦА")
+        reference += "\n\n" + sheets.describe(tables, [], REF_TABLE_HEADER)
 
     await db.set_reference(data["assignment_id"], reference, images)
     text, keyboard = await _task_card(data["assignment_id"])
@@ -655,7 +655,7 @@ SEED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed")
 
 
 def _load_seed():
-    """[(title, kind, reference|None)] из seed/tasks.json. Бросает понятную ошибку."""
+    """[(title, kind, reference|None, table_urls)] из seed/tasks.json. Бросает понятную ошибку."""
     path = os.path.join(SEED_DIR, "tasks.json")
     with open(path, encoding="utf-8") as f:
         items = json.load(f)
@@ -668,26 +668,37 @@ def _load_seed():
         kind = item.get("kind", "screenshots")
         if kind not in KIND_LABELS:
             raise ValueError(f"неизвестный тип «{kind}» у задания «{item['title']}»")
-        result.append((item["title"].strip(), kind, reference))
+        result.append((item["title"].strip(), kind, reference, list(item.get("reference_tables") or [])))
     return result
+
+
+REF_TABLE_HEADER = "ЭТАЛОННАЯ ТАБЛИЦА"
+
+
+def _reference_text_part(reference):
+    """Текст эталона без приложенной эталонной таблицы — чтобы сравнивать с файлом из репозитория."""
+    return (reference or "").split(f"\n\n{REF_TABLE_HEADER}")[0].strip()
 
 
 async def _seed_plan():
     seed = _load_seed()
     plan = []  # (action, title, kind, reference, existing)
-    for title, kind, reference in seed:
+    for title, kind, reference, table_urls in seed:
         existing = await db.get_assignment_by_title(title)
         if not existing:
-            plan.append(("create", title, kind, reference, None))
+            plan.append(("create", title, kind, reference, None, [], table_urls))
             continue
         changes = []
+        stored = existing["reference"] or ""
         if existing["kind"] != kind:
             changes.append("тип")
-        if reference is not None and (existing["reference"] or "").strip() != reference:
+        if reference is not None and _reference_text_part(stored) != reference:
             changes.append("эталон")
+        elif table_urls and REF_TABLE_HEADER not in stored:
+            changes.append("эталонная таблица")
         if not existing["is_active"]:
             changes.append("видимость")
-        plan.append(("update" if changes else "same", title, kind, reference, existing, changes))
+        plan.append(("update" if changes else "same", title, kind, reference, existing, changes, table_urls))
     titles = {p[1] for p in plan}
     others = [a for a in await db.list_assignments(active_only=False) if a["title"] not in titles and a["is_active"]]
     return plan, others
@@ -731,8 +742,17 @@ async def seed_apply(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     plan, _ = await _seed_plan()
     created = updated = 0
+    warnings = []
     for p in plan:
-        action, title, kind, reference = p[0], p[1], p[2], p[3]
+        action, title, kind, reference, table_urls = p[0], p[1], p[2], p[3], p[6]
+        if action != "same" and table_urls and reference is not None:
+            # эталонная таблица по ссылке скачивается при загрузке и сохраняется текстом
+            tables, problems = await sheets.collect_tables("\n".join(table_urls), [])
+            if tables:
+                reference += "\n\n" + sheets.describe(tables, [], REF_TABLE_HEADER)
+            if problems:
+                warnings.append(f"⚠️ «{title}»: эталонная таблица не открылась — {'; '.join(problems)}. "
+                                "Критерии сохранены, таблицу можно добавить вручную: /tasks → задание → «Эталон».")
         if action == "create":
             await db.add_assignment(title, kind=kind, reference=reference)
             created += 1
@@ -743,7 +763,8 @@ async def seed_apply(callback: types.CallbackQuery):
                 await db.set_assignment_reference(existing["id"], reference)
             await db.set_assignment_active(existing["id"], True)
             updated += 1
-    await callback.message.answer(f"📥 Готово: создано {created}, обновлено {updated}. Подробно — /alltasks")
+    await callback.message.answer(clip("\n\n".join(
+        [f"📥 Готово: создано {created}, обновлено {updated}. Подробно — /alltasks"] + warnings)))
     await callback.answer()
 
 
