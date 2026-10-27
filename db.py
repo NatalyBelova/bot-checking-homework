@@ -158,6 +158,14 @@ MIGRATIONS = [
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id)",
     "CREATE INDEX IF NOT EXISTS idx_versions_homework ON versions(homework_id)",
     "CREATE INDEX IF NOT EXISTS idx_version_files_version ON version_files(version_id)",
@@ -779,3 +787,27 @@ def unfinished_ai_checks(min_age_minutes=2, max_age_hours=24):
             (min_age_minutes, max_age_hours),
         )
         return [row["homework_id"] for row in cursor.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Настройки, которые админ меняет из бота
+# ---------------------------------------------------------------------------
+
+def get_settings():
+    with _cursor() as cursor:
+        cursor.execute("SELECT key, value FROM settings")
+        return dict(cursor.fetchall())
+
+
+@_async
+def set_setting(key, value, updated_by=None):
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO settings (key, value, updated_by, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, str(value), updated_by),
+        )

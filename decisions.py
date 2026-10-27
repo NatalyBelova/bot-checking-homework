@@ -6,7 +6,7 @@ import db
 from common import (
     SUBMIT, bot, clip, fix_keyboard, homework_title, log, notify_reviewers, send_files,
 )
-from config import AI_MAX_ATTEMPTS, AI_MODE
+import settings
 
 from aiogram.types import InlineKeyboardButton
 
@@ -113,7 +113,8 @@ async def process_submission(homework_id, card_text, files):
             log.info("ДЗ #%s: таблица не открылась, вернул ученику (%s)", homework_id, reason)
             return
 
-    if AI_MODE == "off":
+    mode = settings.ai_mode()
+    if mode == "off":
         await notify_reviewers(card_text, files, homework_id)
         return
 
@@ -133,15 +134,15 @@ async def process_submission(homework_id, card_text, files):
             files, homework_id)
         return
 
-    too_many_attempts = result.verdict == "revise" and hw["current_version"] >= AI_MAX_ATTEMPTS
-    if AI_MODE == "auto" and result.verdict in ("accept", "revise") and not too_many_attempts:
+    too_many_attempts = result.verdict == "revise" and hw["current_version"] >= settings.max_attempts()
+    if mode == "auto" and result.verdict in ("accept", "revise") and not too_many_attempts:
         await apply_decision(hw, result.verdict, result.comment, [], reviewed_by="ai")
         await db.mark_ai_review_applied(result.review_id, "ai")
         return
 
     # suggest-режим или спорный случай в auto — решает человек, ИИ подсказывает
     lines = [card_text, "", f"🤖 ИИ {VERDICT_LABELS.get(result.verdict, result.verdict)}"]
-    if AI_MODE == "auto" and too_many_attempts:
+    if mode == "auto" and too_many_attempts:
         lines.append(f"Это уже попытка №{hw['current_version']} — дальше решает человек.")
     if result.verdict == "revise" and result.issues:
         lines += ["", "Нарушения критериев:"] + [f"• {i}" for i in result.issues[:7]]
@@ -166,9 +167,9 @@ RECOVERY_DELAY = 180  # сек после старта: старый конте�
 
 async def recover_unfinished(delay=RECOVERY_DELAY):
     """Повторяет ИИ-проверки, прерванные перезапуском бота (деплой, рестарт)."""
-    if AI_MODE == "off":
-        return
     await asyncio.sleep(delay)
+    if settings.ai_mode() == "off":
+        return
     try:
         homework_ids = await db.unfinished_ai_checks()
     except Exception:

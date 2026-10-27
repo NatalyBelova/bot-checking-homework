@@ -14,11 +14,12 @@ from common import (
     homework_title, submit_hint, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
     review_keyboard, staff_keyboard, student_keyboard, submit_keyboard,
 )
-from config import ADMINS, AI_MODE, DEV_MODE, OPENAI_MODEL, REVIEWERS
+import settings
+from config import ADMINS, DEV_MODE, OPENAI_MODEL, REVIEWERS
 
 dp = Dispatcher()
 fallback_router = Router()  # подключается последним: ловит всё, что не поймали другие
-ADMIN_ONLY_COMMANDS = {"/seed", "/stats", "/export"}
+ADMIN_ONLY_COMMANDS = {"/seed", "/stats", "/export", "/settings"}
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ async def start(message: types.Message):
     if is_staff(user_id):
         lines = []
         if is_admin(user_id):
-            lines.append("Ты админ 📊 — кнопки внизу: сводка, ученики, выгрузка.")
+            lines.append("Ты админ 📊 — кнопки внизу: сводка, ученики, выгрузка, настройки ИИ.")
         if is_reviewer(user_id):
             lines.append("Ты проверяешь ДЗ ✏️ — новые работы приходят сюда.")
         lines += [
@@ -39,6 +40,7 @@ async def start(message: types.Message):
             "/tasks — список заданий",
             "/alltasks — все задания подробно: тип, эталон, статистика",
             "/seed — загрузить задания и эталоны из репозитория (админ)",
+            "/settings — режим ИИ-проверки (админ)",
             "/addtask Название — добавить задание",
             "/hw номер — история ДЗ",
             "/cancel — сбросить текущее действие",
@@ -482,8 +484,11 @@ dp.include_router(fallback_router)
 
 async def main():
     db.init_db()
+    settings.load()
+    mode = settings.ai_mode()
     log.info("Проверяющие: %s, админы: %s", REVIEWERS, ADMINS)
-    log.info("ИИ-проверка: %s%s", AI_MODE, f" ({OPENAI_MODEL})" if AI_MODE != "off" else "")
+    log.info("ИИ-проверка: %s%s, попыток до человека: %s", mode,
+             f" ({OPENAI_MODEL})" if mode != "off" else "", settings.max_attempts())
     asyncio.create_task(decisions.recover_unfinished())
     await dp.start_polling(bot)
 

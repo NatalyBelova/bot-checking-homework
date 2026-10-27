@@ -33,6 +33,7 @@ OPENAI_REASONING = os.getenv("OPENAI_REASONING", "medium").lower()
 # off     — ИИ не используется
 # suggest — ИИ предлагает решение, проверяющий подтверждает (по умолчанию)
 # auto    — ИИ сам принимает/возвращает, спорные работы уходят человеку
+# Это начальное значение: админ меняет режим в боте (/settings), выбор хранится в базе.
 AI_MODE = os.getenv("AI_MODE", "suggest").lower() if OPENAI_API_KEY else "off"
 if AI_MODE not in ("off", "suggest", "auto"):
     AI_MODE = "suggest"

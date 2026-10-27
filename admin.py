@@ -12,9 +12,10 @@ import export
 import sheets
 from zoneinfo import ZoneInfo
 
-from config import AI_MODE, TIMEZONE
+import settings
+from config import TIMEZONE
 from common import (
-    BTN_EXPORT, BTN_PENDING, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
+    BTN_EXPORT, BTN_PENDING, BTN_SETTINGS, BTN_STATS, BTN_STUDENTS, REFERENCE, STATUS_LABELS,
     _user_locks, bot, clip, decode_text, download_attachment, extract_content, fmt_ago, fmt_dt, homework_title,
     is_admin, is_reviewer, is_staff, log, merge_text, review_keyboard, send_files, student_label,
 )
@@ -77,9 +78,8 @@ async def stats(message: types.Message):
         lines.append(f"В среднем попыток до принятия: {o['avg_attempts']}")
 
     ai = await db.ai_stats()
-    if AI_MODE != "off" or ai["total"]:
-        mode = {"off": "выключена", "suggest": "ИИ предлагает, человек подтверждает",
-                "auto": "ИИ решает сам, спорное — человеку"}[AI_MODE]
+    if settings.ai_mode() != "off" or ai["total"]:
+        mode = settings.MODE_LABELS[settings.ai_mode()]
         lines += ["", f"🤖 ИИ-проверка: {mode}",
                   f"Проверок ИИ: {ai['total']} · ИИ решил сам: {ai['auto_applied']} · "
                   f"подтверждено человеком: {ai['confirmed']}"
@@ -592,8 +592,7 @@ async def all_tasks(message: types.Message):
     stats = {s["id"]: s for s in await db.stats_by_assignment()}
     with_ref = sum(1 for a in assignments if _has_reference(a))
     visible = sum(1 for a in assignments if a["is_active"])
-    ai_mode = {"off": "выключена", "suggest": "ИИ предлагает, человек подтверждает",
-               "auto": "ИИ решает сам, спорное — человеку"}[AI_MODE]
+    ai_mode = settings.MODE_LABELS[settings.ai_mode()]
     await message.answer(
         f"📚 Заданий: {len(assignments)} · с эталоном: {with_ref} · видно ученикам: {visible}\n"
         f"🤖 ИИ-проверка: {ai_mode}"
@@ -601,7 +600,7 @@ async def all_tasks(message: types.Message):
 
     for a in assignments:
         st = stats.get(a["id"]) or {"total": 0, "accepted": 0, "revision": 0, "pending": 0}
-        if AI_MODE == "off":
+        if settings.ai_mode() == "off":
             ai = "🤖 ИИ выключен — проверяет человек"
         elif _has_reference(a):
             ai = "🤖 ИИ проверяет по эталону"
@@ -757,3 +756,80 @@ async def seed_hide_others(callback: types.CallbackQuery):
     await callback.message.answer(
         f"🙈 Скрыто от учеников: {len(others)}. Вернуть можно в /tasks → задание → «Показать ученикам»")
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Настройки ИИ (только админ)
+# ---------------------------------------------------------------------------
+
+MODE_BUTTONS = {"suggest": "🤝 Предлагает", "auto": "⚡ Сам решает", "off": "⛔ Выключен"}
+MODE_HELP = {
+    "suggest": "ИИ проверяет и присылает проверяющему свой вердикт. Ученик получает ответ, "
+               "только когда проверяющий нажмёт «Согласен» или решит сам.",
+    "auto": "Уверенный вердикт ИИ сразу уходит ученику. Проверяющему приходят только спорные "
+            "работы, ошибки проверки и работы, которые ИИ уже несколько раз возвращал.",
+    "off": "ИИ не используется — все работы проверяет человек, как в старом боте.",
+}
+
+
+def _settings_view():
+    mode = settings.ai_mode()
+    attempts = settings.max_attempts()
+    lines = [
+        "⚙️ Настройки ИИ-проверки",
+        "",
+        f"Режим: {settings.MODE_LABELS[mode]}",
+        MODE_HELP[mode],
+    ]
+    if not settings.ai_available():
+        lines += ["", "⚠️ Не задан ключ OPENAI_API_KEY — ИИ недоступен. Включить его можно после "
+                      "добавления ключа в Railway."]
+        return "\n".join(lines), None
+
+    lines += ["", f"В режиме «Сам решает» с попытки №{attempts} работу смотрит человек, "
+                  "чтобы ученика не возвращали бесконечно."]
+    rows = [[_btn(("✅ " if m == mode else "") + MODE_BUTTONS[m], f"setmode_{m}") for m in settings.MODES]]
+    rows.append([_btn(("✅ " if n == attempts else "") + f"Человек с {n}-й", f"setatt_{n}")
+                 for n in settings.ATTEMPT_CHOICES])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(F.text == BTN_SETTINGS, _admin)
+@router.message(Command("settings"), _admin)
+async def show_settings(message: types.Message):
+    text, keyboard = _settings_view()
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("setmode_") | F.data.startswith("setatt_"))
+async def change_setting(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Настройки меняет только админ", show_alert=True)
+        return
+    if not settings.ai_available():
+        await callback.answer("Нет ключа OpenAI — ИИ недоступен", show_alert=True)
+        return
+
+    key, value = callback.data.split("_", 1)
+    who = f"human:{callback.from_user.id}"
+    if key == "setmode":
+        if value not in settings.MODES:
+            await callback.answer()
+            return
+        changed = value != settings.ai_mode()
+        await settings.set_ai_mode(value, who)
+        note = f"Режим: {settings.MODE_LABELS[value]}"
+    else:
+        n = int(value)
+        changed = n != settings.max_attempts()
+        await settings.set_max_attempts(n, who)
+        note = f"Человек подключается с попытки №{n}"
+
+    if changed:
+        log.info("Настройки ИИ изменил %s: %s", callback.from_user.id, note)
+        text, keyboard = _settings_view()
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception:
+            log.exception("Не удалось обновить сообщение с настройками")
+    await callback.answer(note)
