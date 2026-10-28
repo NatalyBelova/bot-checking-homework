@@ -4,6 +4,7 @@ check_homework() собирает эталон задания, историю п
 отправляет всё в модель и возвращает структурированный вердикт. Сохраняет результат в ai_reviews.
 """
 import base64
+import re
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional
 
@@ -85,8 +86,9 @@ JIRA_PROMPT = """\
 
 - bug_number: какой это баг из списка преподавателя (номер из списка). Сопоставляй по смыслу \
 (заголовок, шаги, фактический результат), а не по словам. Если такого бага в списке нет — null.
-- counts: true, только если баг из списка засчитываемых. Баги из списка незасчитываемых, баги не \
-из списка, «не баги» и неоформленные задачи — false.
+- counts: true, если это баг из списка засчитываемых — даже если он плохо оформлен (тогда \
+перечисли правки в must_fix). counts зависит только от того, КАКОЙ это баг, а не от оформления. \
+Баги из списка незасчитываемых, баги не из списка и «не баги» — false.
 - поля шаблона (importance, title, description, environment, steps, expected, actual, screenshots, \
 priority, severity, visual, extra): по каждому одна короткая строка. Начинай с «✅», если всё \
 хорошо, с «❌», если это нужно исправить (и что именно), с «⚠️», если это совет. \
@@ -148,7 +150,19 @@ BUG_STATUS_STUDENT = {"counted": "✅ засчитан", "fix": "🔧 нужно
 FOREIGN_TEXT = "Эту задачу завёл другой человек. Засчитываются только баги, которые ты завёл в Jira сам."
 
 
-def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dict):
+COUNTED_RANGE_RE = re.compile(r"Засчитываются\s*\(\s*№\s*(\d+)\s*[–—-]\s*(\d+)\s*\)")
+
+
+def counted_numbers(reference):
+    """Номера засчитываемых багов из эталона («Засчитываются (№1–8)»), или None, если не указаны."""
+    match = COUNTED_RANGE_RE.search(reference or "")
+    if not match:
+        return None
+    first, last = int(match.group(1)), int(match.group(2))
+    return set(range(first, last + 1)) if first <= last else None
+
+
+def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dict, counted_set=None):
     """Решение по каждому багу принимает код, а не модель: засчитан / правки / не засчитан.
 
     already_counted — {номер бага: ключ задачи}, засчитанные раньше. Повтор того же бага не засчитывается.
@@ -159,6 +173,9 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
     for check in verdict.bugs:
         key = check.key.strip().upper()
         reason = ""
+        if counted_set is not None:
+            # засчитывается ли баг, решает список преподавателя, а не модель
+            check.counts = check.bug_number in counted_set
         if not check.counts:
             status = "rejected"
         elif check.bug_number is not None and check.bug_number in seen:
@@ -433,6 +450,10 @@ async def check_homework(homework_id, material=None):
                 return await _jira_unsure(homework_id, version_id, "все присланные задачи завёл другой человек: "
                                           + ", ".join(f"{i.key} ({i.reporter_name})" for i in foreign))
         content = await build_input(hw, assignment, versions, material, already_counted)
+        if foreign:
+            content.append(_text_part(
+                "Задачи " + ", ".join(i.key for i in foreign) + " завёл другой человек — их не проверяй "
+                "и не упоминай, бот обработает их сам."))
         model_kwargs = {"text_format": JiraVerdict, "extra_instructions": JIRA_PROMPT} if is_jira else {}
         try:
             verdict, tokens_in, tokens_out = await call_model(content, **model_kwargs)
@@ -457,7 +478,7 @@ async def check_homework(homework_id, material=None):
 
     if is_jira:
         return await _finish_jira(homework_id, version_id, verdict, material, already_counted,
-                                  tokens_in, tokens_out, foreign)
+                                  tokens_in, tokens_out, foreign, counted_numbers(assignment["reference"]))
 
     final_verdict, guard_note = normalize_verdict(verdict)
     comment = verdict.comment_for_student.strip()
@@ -535,13 +556,13 @@ async def _jira_unsure(homework_id, version_id, problem):
 
 
 async def _finish_jira(homework_id, version_id, verdict, material, already_counted, tokens_in, tokens_out,
-                       foreign=()):
+                       foreign=(), counted_set=None):
     issues_by_key = {i.key: i for i in material.jira_issues}
     # задачи, которые модель пропустила, не теряем — их посмотрит человек
     missed = [k for k in issues_by_key if k not in {b.key.strip().upper() for b in verdict.bugs}]
     # задачи, которых не было в отправке (модель придумала ключ), не учитываем
     verdict.bugs = [b for b in verdict.bugs if b.key.strip().upper() in issues_by_key]
-    bugs, counted_total = judge_bugs(verdict, already_counted, issues_by_key)
+    bugs, counted_total = judge_bugs(verdict, already_counted, issues_by_key, counted_set)
     bugs += [{"key": i.key, "bug_number": None, "status": "foreign", "reason": "", "reporter_id": i.reporter_id,
               "reporter_name": i.reporter_name, "url": i.url, "check": None} for i in foreign]
     required = JIRA_REQUIRED_BUGS
