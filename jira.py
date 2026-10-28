@@ -53,6 +53,8 @@ class Issue:
     text: str
     images: List[tuple] = field(default_factory=list)  # [(mime, bytes, filename)]
     image_errors: List[str] = field(default_factory=list)  # вложения-картинки, которые не скачались
+    reporter_id: Optional[str] = None    # accountId автора задачи
+    reporter_name: str = ""
 
 
 def enabled():
@@ -216,8 +218,10 @@ def _session():
 async def fetch_issue(session, key):
     data = await _get_json(session, f"{_base()}/rest/api/2/issue/{key}",
                            params={"fields": "*all", "expand": "names,changelog"})
+    reporter = data.get("fields", {}).get("reporter") or {}
     issue = Issue(key=data.get("key", key), url=f"{_base()}/browse/{data.get('key', key)}",
-                  text=issue_to_text(data))
+                  text=issue_to_text(data), reporter_id=reporter.get("accountId"),
+                  reporter_name=reporter.get("displayName") or "")
     for a in (data.get("fields", {}).get("attachment") or []):
         if len(issue.images) >= MAX_IMAGES_PER_ISSUE:
             break
@@ -232,13 +236,14 @@ async def fetch_issue(session, key):
     return issue
 
 
-async def collect_issues(text):
+async def collect_issues(text, skip_keys=()):
     """Возвращает (issues, problems, config_problem).
 
     problems — по каким задачам ученика не получилось (ученик может исправить);
     config_problem — проблема с доступом бота (ученик не виноват), иначе None.
+    skip_keys — задачи, которые бот уже удалил (засчитанные раньше): их не запрашиваем.
     """
-    keys = find_issue_keys(text)
+    keys = [k for k in find_issue_keys(text) if k not in set(skip_keys)]
     if not keys:
         return [], [], None
     if not enabled():
@@ -260,3 +265,112 @@ async def collect_issues(text):
                 config_problem = f"не удалось связаться с Jira ({type(e).__name__})"
                 break
     return issues, problems, config_problem
+
+
+# ---------------------------------------------------------------------------
+# Управление: удаление задач, добавление и удаление людей (нужны права администратора Jira)
+# ---------------------------------------------------------------------------
+
+async def _error_text(response):
+    try:
+        data = await response.json(content_type=None)
+        parts = list(data.get("errorMessages") or []) + [str(v) for v in (data.get("errors") or {}).values()]
+        if parts:
+            return "; ".join(parts)[:300]
+    except Exception:
+        pass
+    return f"ошибка {response.status}"
+
+
+def _admin_error(status, detail):
+    if status == 401:
+        return JiraError("бот не смог войти в Jira — проверь JIRA_EMAIL и JIRA_TOKEN", kind="config")
+    if status == 403:
+        return JiraError(f"у аккаунта бота не хватает прав в Jira ({detail})", kind="config")
+    return JiraError(detail)
+
+
+def _write_session():
+    auth = aiohttp.BasicAuth(JIRA_EMAIL or "", JIRA_TOKEN or "")
+    return aiohttp.ClientSession(auth=auth, timeout=aiohttp.ClientTimeout(total=40), headers={
+        "Accept": "application/json", "Content-Type": "application/json", "X-Atlassian-Token": "no-check"})
+
+
+async def delete_issues(keys):
+    """Удаляет задачи. Возвращает (удалённые_или_уже_отсутствующие, {ключ: причина ошибки})."""
+    done, failed = [], {}
+    if not keys:
+        return done, failed
+    if not enabled():
+        return done, {k: "Jira не подключена к боту" for k in keys}
+    async with _write_session() as session:
+        for key in keys:
+            try:
+                async with session.delete(f"{_base()}/rest/api/2/issue/{key}",
+                                          params={"deleteSubtasks": "true"}) as response:
+                    if response.status in (204, 404):  # 404 — уже удалена руками
+                        done.append(key)
+                    else:
+                        failed[key] = str(_admin_error(response.status, await _error_text(response)))
+            except (aiohttp.ClientError, TimeoutError) as e:
+                failed[key] = f"нет связи с Jira ({type(e).__name__})"
+    return done, failed
+
+
+async def find_user(email):
+    """Пользователь сайта по почте: (accountId, имя) или None."""
+    async with _write_session() as session:
+        async with session.get(f"{_base()}/rest/api/3/user/search", params={"query": email}) as response:
+            if response.status >= 400:
+                raise _admin_error(response.status, await _error_text(response))
+            users = [u for u in await response.json() if u.get("accountType") == "atlassian"]
+    for u in users:
+        if (u.get("emailAddress") or "").lower() == email.lower():
+            return u["accountId"], u.get("displayName") or email
+    if len(users) == 1:
+        return users[0]["accountId"], users[0].get("displayName") or email
+    return None
+
+
+async def invite_user(email):
+    """Приглашает человека в Jira (ему придёт письмо от Atlassian). Возвращает (accountId, имя)."""
+    if not enabled():
+        raise JiraError("Jira не подключена к боту (нет JIRA_URL / JIRA_EMAIL / JIRA_TOKEN)", kind="config")
+    async with _write_session() as session:
+        async with session.post(f"{_base()}/rest/api/3/user",
+                                json={"emailAddress": email, "products": ["jira-software"]}) as response:
+            if response.status in (200, 201):
+                data = await response.json()
+                return data.get("accountId"), data.get("displayName") or email
+            detail = await _error_text(response)
+            status = response.status
+    if status == 400 and ("exist" in detail.lower() or "существ" in detail.lower()):
+        found = await find_user(email)
+        if found:
+            return found
+    raise _admin_error(status, detail)
+
+
+async def remove_user(account_id):
+    """Убирает человека из Jira (освобождает место). Задачи и история остаются."""
+    if not enabled():
+        raise JiraError("Jira не подключена к боту", kind="config")
+    async with _write_session() as session:
+        async with session.delete(f"{_base()}/rest/api/3/user", params={"accountId": account_id}) as response:
+            if response.status in (200, 204, 404):
+                return
+            raise _admin_error(response.status, await _error_text(response))
+
+
+async def issues_by_reporter(account_id, projects):
+    """Ключи задач этого автора в проектах ДЗ (чтобы удалить оставшиеся баги ученика)."""
+    if not (account_id and projects):
+        return []
+    jql = f'project in ({", ".join(sorted(projects))}) AND reporter = "{account_id}" ORDER BY key'
+    async with _write_session() as session:
+        async with session.get(f"{_base()}/rest/api/3/search/jql",
+                               params={"jql": jql, "fields": "summary", "maxResults": "100"}) as response:
+            if response.status >= 400:
+                raise _admin_error(response.status, await _error_text(response))
+            data = await response.json()
+    return [i["key"] for i in data.get("issues", [])]

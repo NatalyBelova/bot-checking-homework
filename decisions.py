@@ -3,12 +3,14 @@ import asyncio
 
 import ai_review
 import db
+import jira
 from common import (
-    SUBMIT, bot, clip, fix_keyboard, homework_title, log, notify_reviewers, send_files,
+    SUBMIT, fix_keyboard, homework_title, is_reviewer, log, notify_reviewers, send_files, send_long,
 )
+from config import REVIEWERS
 import settings
 
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ссылки на фоновые задачи, чтобы их не собрал сборщик мусора (и чтобы тесты могли их дождаться)
 background_tasks = set()
@@ -33,7 +35,7 @@ async def apply_decision(hw, action, text, files, reviewed_by):
         caption = f"✅ {homework_title(hw)} принято!"
         if text:
             caption += f"\n\n{text}"
-        await bot.send_message(student_id, clip(caption))
+        await send_long(student_id, caption)
         await send_files(student_id, files)
         return
 
@@ -42,7 +44,7 @@ async def apply_decision(hw, action, text, files, reviewed_by):
     if text:
         caption += f"\n\n{text}"
     await send_files(student_id, files)
-    await bot.send_message(student_id, clip(caption), reply_markup=fix_keyboard(homework_id))
+    await send_long(student_id, caption, reply_markup=fix_keyboard(homework_id))
 
     # если ученик ничего не делает в боте — сразу ждём от него исправления
     student_state, _ = await db.get_state(student_id)
@@ -134,22 +136,35 @@ async def process_submission(homework_id, card_text, files):
             files, homework_id)
         return
 
-    too_many_attempts = result.verdict == "revise" and hw["current_version"] >= settings.max_attempts()
+    # в блоке 5 ученик сдаёт баги порциями — много попыток там нормально
+    too_many_attempts = (result.verdict == "revise" and hw["current_version"] >= settings.max_attempts()
+                         and not result.details)
     if mode == "auto" and result.verdict in ("accept", "revise") and not too_many_attempts:
         await apply_decision(hw, result.verdict, result.comment, [], reviewed_by="ai")
         await db.mark_ai_review_applied(result.review_id, "ai")
+        review = await db.get_ai_review(result.review_id)
+        await apply_jira_effects(review, hw, confirmed_by=None)
         return
 
     # suggest-режим или спорный случай в auto — решает человек, ИИ подсказывает
     lines = [card_text, "", f"🤖 ИИ {VERDICT_LABELS.get(result.verdict, result.verdict)}"]
     if mode == "auto" and too_many_attempts:
         lines.append(f"Это уже попытка №{hw['current_version']} — дальше решает человек.")
-    if result.verdict == "revise" and result.issues:
-        lines += ["", "Нарушения критериев:"] + [f"• {i}" for i in result.issues[:7]]
-    if result.comment:
-        lines += ["", "Комментарий для ученика:", result.comment]
-    if result.note:
-        lines += ["", f"📝 Для тебя: {result.note}"]
+    if result.details:
+        # блок 5: сначала сводка по багам, потом что удалится и ответ ученику
+        lines += ["", result.note]
+        to_delete = [b["key"] for b in result.details["bugs"] if b["status"] in ("counted", "rejected")]
+        if to_delete and result.verdict in ("accept", "revise"):
+            lines += ["", "🗑 После «Согласен» удалю из Jira: " + ", ".join(to_delete)]
+        if result.comment:
+            lines += ["", "Ответ ученику:", result.comment]
+    else:
+        if result.verdict == "revise" and result.issues:
+            lines += ["", "Нарушения критериев:"] + [f"• {i}" for i in result.issues[:7]]
+        if result.comment:
+            lines += ["", "Комментарий для ученика:", result.comment]
+        if result.note:
+            lines += ["", f"📝 Для тебя: {result.note}"]
 
     extra = []
     if result.verdict in ("accept", "revise"):
@@ -186,3 +201,88 @@ async def recover_unfinished(delay=RECOVERY_DELAY):
                   "проверка прервалась при перезапуске бота, проверяю заново")
         log.info("Восстанавливаю проверку ДЗ #%s", homework_id)
         start_processing(homework_id, f"{header}\n\n{v['text'] or ''}".strip(), v["files"])
+
+
+# ---------------------------------------------------------------------------
+# Блок 5 (Jira): что происходит после того, как ученик получил разбор багов
+# ---------------------------------------------------------------------------
+
+async def _send_reviewers(text, keyboard=None, only=None):
+    for reviewer in ([only] if only else REVIEWERS):
+        try:
+            await send_long(reviewer, text, reply_markup=keyboard)
+        except Exception:
+            log.exception("Не удалось отправить сообщение проверяющему %s", reviewer)
+
+
+async def delete_issues_report(keys):
+    """Удаляет задачи из Jira и возвращает текст отчёта."""
+    done, failed = await jira.delete_issues(keys)
+    if done:
+        await db.mark_issues_deleted(done)
+    lines = []
+    if done:
+        lines.append("🗑 Удалено из Jira: " + ", ".join(done))
+    if failed:
+        lines.append("⚠️ Не удалось удалить: " + "; ".join(f"{k} — {v}" for k, v in failed.items()))
+    return "\n".join(lines) or "Удалять нечего"
+
+
+async def apply_jira_effects(review, hw, confirmed_by):
+    """Записывает итог по багам, удаляет засчитанные/незасчитанные задачи и предлагает финал.
+
+    confirmed_by — id проверяющего, который нажал «Согласен» (удаляем сразу).
+    None — ИИ применил решение сам (режим auto): удаление ждёт кнопки проверяющего.
+    """
+    details = (review or {}).get("details")
+    if not details:
+        return
+    homework_id = hw["id"]
+    await db.save_jira_bugs(homework_id, review["id"], details["bugs"])
+    reporters = {b["reporter_id"] for b in details["bugs"] if b.get("reporter_id")}
+    if reporters:
+        await db.link_jira_users_to_student(reporters, hw["student_id"])
+
+    keys = await db.issues_to_delete(homework_id, review["id"])
+    if keys:
+        if confirmed_by and is_reviewer(confirmed_by):
+            await _send_reviewers(await delete_issues_report(keys), only=confirmed_by)
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text=f"🗑 Удалить из Jira ({len(keys)})", callback_data=f"jdel_{homework_id}")]])
+            await _send_reviewers(
+                f"ИИ разобрал баги по {homework_title(hw)} (ДЗ #{homework_id}) и отправил ученику.\n"
+                f"Можно удалить из Jira: {', '.join(keys)}", keyboard)
+
+    if review["verdict"] == "accept":
+        await offer_final_cleanup(hw)
+
+
+async def final_cleanup_plan(homework_id):
+    """Кого удалить из Jira, когда ученик нашёл все баги: (добавленные через бота, неизвестные авторы).
+
+    Удаляем только тех, кого добавили через бота (/jira) — так бот не удалит преподавателя или
+    кого-то ещё, чьи задачи оказались в отправке.
+    """
+    known, unknown = [], []
+    for account_id in await db.reporters_for_homework(homework_id):
+        row = await db.find_jira_user(account_id=account_id)
+        (known if row else unknown).append((account_id, row))
+    return known, unknown
+
+
+async def offer_final_cleanup(hw):
+    homework_id = hw["id"]
+    known, unknown = await final_cleanup_plan(homework_id)
+    who = hw["student_name"] or f"id:{hw['student_id']}"
+    lines = [f"🎉 {who} нашёл все баги — {homework_title(hw)} принято (ДЗ #{homework_id})."]
+    keyboard = None
+    if known:
+        lines.append("Удалить из Jira ученика (" + ", ".join(row["email"] for _, row in known)
+                     + ") и все его оставшиеся задачи?")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🗑 Удалить ученика и его задачи", callback_data=f"jfin_{homework_id}")]])
+    if unknown or not known:
+        lines.append("Автора задач не добавляли в Jira через бота — его бот не удаляет. "
+                     "Удали ученика из Jira вручную.")
+    await _send_reviewers("\n".join(lines), keyboard)

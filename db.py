@@ -166,6 +166,36 @@ MIGRATIONS = [
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # --- блок 5 (Jira): разбор каждого бага и люди, добавленные в Jira через бота ---
+    "ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS details JSONB",
+    """
+    CREATE TABLE IF NOT EXISTS jira_bugs (
+        id SERIAL PRIMARY KEY,
+        homework_id INTEGER REFERENCES homeworks(id) ON DELETE CASCADE,
+        review_id INTEGER,
+        issue_key TEXT NOT NULL,
+        bug_number INTEGER,              -- номер бага из списка преподавателя (NULL — не из списка)
+        status TEXT NOT NULL,            -- counted | fix | rejected
+        reporter_id TEXT,                -- accountId автора задачи в Jira
+        delete_requested BOOLEAN DEFAULT FALSE,
+        deleted_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_jira_bugs_homework ON jira_bugs(homework_id)",
+    """
+    CREATE TABLE IF NOT EXISTS jira_users (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL,
+        account_id TEXT,
+        display_name TEXT,
+        student_id BIGINT,
+        added_by TEXT,
+        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        removed_at TIMESTAMP,
+        removed_by TEXT
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id)",
     "CREATE INDEX IF NOT EXISTS idx_versions_homework ON versions(homework_id)",
     "CREATE INDEX IF NOT EXISTS idx_version_files_version ON version_files(version_id)",
@@ -707,16 +737,17 @@ def count_reference_files(assignment_id):
 
 @_async
 def add_ai_review(homework_id, version_id, verdict=None, comment=None, note=None,
-                  model=None, input_tokens=None, output_tokens=None, error=None):
+                  model=None, input_tokens=None, output_tokens=None, error=None, details=None):
     with _cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO ai_reviews (homework_id, version_id, verdict, comment, note, model,
-                                    input_tokens, output_tokens, error)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    input_tokens, output_tokens, error, details)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
-            (homework_id, version_id, verdict, comment, note, model, input_tokens, output_tokens, error),
+            (homework_id, version_id, verdict, comment, note, model, input_tokens, output_tokens, error,
+             Json(details) if details is not None else None),
         )
         return cursor.fetchone()[0]
 
@@ -811,3 +842,153 @@ def set_setting(key, value, updated_by=None):
             """,
             (key, str(value), updated_by),
         )
+
+
+# ---------------------------------------------------------------------------
+# Блок 5: баги ученика в Jira и люди в Jira
+# ---------------------------------------------------------------------------
+
+@_async
+def save_jira_bugs(homework_id, review_id, bugs):
+    """bugs: [{key, bug_number, status, reporter_id}] — итог разбора, который увидел ученик.
+
+    Засчитанные и незасчитанные баги помечаются к удалению из Jira.
+    """
+    with _cursor() as cursor:
+        for b in bugs:
+            cursor.execute(
+                """
+                INSERT INTO jira_bugs (homework_id, review_id, issue_key, bug_number, status, reporter_id,
+                                       delete_requested)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (homework_id, review_id, b["key"], b.get("bug_number"), b["status"], b.get("reporter_id"),
+                 b["status"] in ("counted", "rejected")),
+            )
+
+
+@_async
+def counted_bugs(homework_id):
+    """{номер бага: ключ задачи} — баги, которые уже засчитаны по этому ДЗ."""
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT bug_number, MIN(issue_key) FROM jira_bugs
+            WHERE homework_id=%s AND status='counted' AND bug_number IS NOT NULL
+            GROUP BY bug_number
+            """,
+            (homework_id,),
+        )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+@_async
+def deleted_issue_keys(homework_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            "SELECT DISTINCT issue_key FROM jira_bugs WHERE homework_id=%s AND deleted_at IS NOT NULL",
+            (homework_id,),
+        )
+        return {row[0] for row in cursor.fetchall()}
+
+
+@_async
+def issues_to_delete(homework_id, review_id=None):
+    """Задачи, помеченные к удалению и ещё не удалённые (по одной проверке или по всему ДЗ)."""
+    with _cursor() as cursor:
+        sql = """
+            SELECT DISTINCT issue_key FROM jira_bugs b
+            WHERE b.homework_id=%s AND b.delete_requested AND b.deleted_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM jira_bugs d WHERE d.issue_key=b.issue_key AND d.deleted_at IS NOT NULL)
+        """
+        params = [homework_id]
+        if review_id is not None:
+            sql += " AND b.review_id=%s"
+            params.append(review_id)
+        cursor.execute(sql + " ORDER BY issue_key", params)
+        return [row[0] for row in cursor.fetchall()]
+
+
+@_async
+def mark_issues_deleted(keys):
+    with _cursor() as cursor:
+        cursor.execute(
+            "UPDATE jira_bugs SET deleted_at=CURRENT_TIMESTAMP WHERE issue_key = ANY(%s) AND deleted_at IS NULL",
+            (list(keys),),
+        )
+
+
+@_async
+def reporters_for_homework(homework_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            "SELECT DISTINCT reporter_id FROM jira_bugs WHERE homework_id=%s AND reporter_id IS NOT NULL",
+            (homework_id,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+
+@_async
+def add_jira_user(email, account_id, display_name, added_by):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            """
+            INSERT INTO jira_users (email, account_id, display_name, added_by)
+            VALUES (%s, %s, %s, %s) RETURNING *
+            """,
+            (email.lower(), account_id, display_name, added_by),
+        )
+        return cursor.fetchone()
+
+
+@_async
+def active_jira_users():
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT * FROM jira_users WHERE removed_at IS NULL ORDER BY added_at")
+        return cursor.fetchall()
+
+
+@_async
+def get_jira_user(user_row_id):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT * FROM jira_users WHERE id=%s", (user_row_id,))
+        return cursor.fetchone()
+
+
+@_async
+def find_jira_user(email=None, account_id=None):
+    """Активная запись по почте или accountId."""
+    with _cursor(dict_rows=True) as cursor:
+        if email:
+            cursor.execute("SELECT * FROM jira_users WHERE email=%s AND removed_at IS NULL "
+                           "ORDER BY id DESC LIMIT 1", (email.lower(),))
+        else:
+            cursor.execute("SELECT * FROM jira_users WHERE account_id=%s AND removed_at IS NULL "
+                           "ORDER BY id DESC LIMIT 1", (account_id,))
+        return cursor.fetchone()
+
+
+@_async
+def link_jira_users_to_student(account_ids, student_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            "UPDATE jira_users SET student_id=%s WHERE account_id = ANY(%s) AND removed_at IS NULL",
+            (student_id, list(account_ids)),
+        )
+
+
+@_async
+def mark_jira_user_removed(account_id, removed_by):
+    with _cursor() as cursor:
+        cursor.execute(
+            "UPDATE jira_users SET removed_at=CURRENT_TIMESTAMP, removed_by=%s "
+            "WHERE account_id=%s AND removed_at IS NULL",
+            (removed_by, account_id),
+        )
+
+
+@_async
+def jira_bug_keys(homework_id):
+    with _cursor() as cursor:
+        cursor.execute("SELECT DISTINCT issue_key FROM jira_bugs WHERE homework_id=%s", (homework_id,))
+        return [row[0] for row in cursor.fetchall()]

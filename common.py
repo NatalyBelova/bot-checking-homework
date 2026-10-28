@@ -152,6 +152,29 @@ def clip(text, limit=MAX_TEXT):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+def split_text(text, limit=MAX_TEXT, max_parts=6):
+    """Длинный текст → несколько сообщений, по границам абзацев/строк."""
+    text = text or ""
+    parts = []
+    while len(text) > limit and len(parts) < max_parts - 1:
+        cut = text.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = text.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        parts.append(text[:cut].rstrip())
+        text = text[cut:].lstrip("\n")
+    parts.append(clip(text, limit))
+    return parts
+
+
+async def send_long(chat_id, text, reply_markup=None):
+    """Отправляет длинный текст частями; кнопки — у последней части."""
+    parts = split_text(text)
+    for i, part in enumerate(parts):
+        await bot.send_message(chat_id, part, reply_markup=reply_markup if i == len(parts) - 1 else None)
+
+
 def student_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY)]],
@@ -255,7 +278,7 @@ async def notify_reviewers(text, files, homework_id, extra_rows=None):
     for reviewer in REVIEWERS:
         try:
             await send_files(reviewer, files)
-            await bot.send_message(reviewer, clip(text), reply_markup=keyboard)
+            await send_long(reviewer, text, reply_markup=keyboard)
         except Exception:
             log.exception("Не удалось отправить ДЗ #%s проверяющему %s", homework_id, reviewer)
 

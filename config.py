@@ -42,6 +42,8 @@ if AI_MODE not in ("off", "suggest", "auto"):
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
+# Блок 5: сколько засчитанных багов нужно, чтобы задание было принято
+JIRA_REQUIRED_BUGS = int(os.getenv("JIRA_REQUIRED_BUGS", "5"))
 
 # В режиме auto: начиная с этой попытки работу смотрит человек (чтобы не крутить ученика бесконечно)
 AI_MAX_ATTEMPTS = int(os.getenv("AI_MAX_ATTEMPTS", "3"))

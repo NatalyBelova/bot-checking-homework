@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import admin
 import db
 import decisions
+import jira_admin
 from common import (
     ALBUM_DELAY, BTN_MY, BTN_NEW, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT,
     _acting_as_student, _albums, _idle_albums, _user_locks,
@@ -19,7 +20,7 @@ from config import ADMINS, DEV_MODE, OPENAI_MODEL, REVIEWERS
 
 dp = Dispatcher()
 fallback_router = Router()  # подключается последним: ловит всё, что не поймали другие
-ADMIN_ONLY_COMMANDS = {"/seed", "/stats", "/export", "/settings"}
+ADMIN_ONLY_COMMANDS = {"/seed", "/stats", "/export", "/settings", "/jira"}
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ async def start(message: types.Message):
             "/alltasks — все задания подробно: тип, эталон, статистика",
             "/seed — загрузить задания и эталоны из репозитория (админ)",
             "/settings — режим ИИ-проверки (админ)",
+            "/jira — люди в Jira: добавить по почте, удалить (админ)",
             "/addtask Название — добавить задание",
             "/hw номер — история ДЗ",
             "/cancel — сбросить текущее действие",
@@ -335,14 +337,19 @@ async def confirm_review(callback: types.CallbackQuery):
     text, files = data.get("text", ""), data.get("files", [])
     reviewed_by = data.get("reviewed_by") or f"human:{reviewer_id}"
     await decisions.apply_decision(hw, data["action"], text, files, reviewed_by=reviewed_by)
+    review = None
     if data.get("ai_review_id"):
         await db.mark_ai_review_applied(data["ai_review_id"], reviewed_by)
+        review = await db.get_ai_review(data["ai_review_id"])
 
     if data["action"] == "accept":
         await callback.message.answer(f"ДЗ #{homework_id} принято ✅")
     else:
         await callback.message.answer(f"Комментарий по ДЗ #{homework_id} отправлен ученику ✏️")
     await callback.answer()
+    if review:
+        # проверяющий поправил текст ИИ, но разбор багов (засчитано/удалить) остаётся в силе
+        await decisions.apply_jira_effects(review, hw, confirmed_by=reviewer_id)
 
 
 @dp.callback_query(F.data == "add_review")
@@ -404,6 +411,7 @@ async def ai_accept_suggestion(callback: types.CallbackQuery):
     result = "принято ✅" if review["verdict"] == "accept" else "отправлено на доработку 🔄"
     await callback.message.answer(f"ДЗ #{hw['id']} {result} — с комментарием ИИ")
     await callback.answer()
+    await decisions.apply_jira_effects(review, hw, confirmed_by=callback.from_user.id)
 
 
 @dp.callback_query(F.data.startswith("aiedit_"))
@@ -458,6 +466,10 @@ async def handle_message(message: types.Message):
         _idle_albums.add(message.media_group_id)
         asyncio.get_running_loop().call_later(30, _idle_albums.discard, message.media_group_id)
 
+    if is_admin(user_id) and message.text and jira_admin.EMAIL_RE.fullmatch(message.text.strip()):
+        await jira_admin.offer_add(message, message.text.strip())
+        return
+
     command = (message.text or "").split()[0].split("@")[0].lower() if (message.text or "").startswith("/") else ""
     if command in ADMIN_ONLY_COMMANDS and is_staff(user_id) and not is_admin(user_id):
         await message.answer(
@@ -479,6 +491,7 @@ async def handle_unknown_callback(callback: types.CallbackQuery):
 
 # порядок важен: сначала кнопки админа, потом «всё остальное»
 dp.include_router(admin.router)
+dp.include_router(jira_admin.router)
 dp.include_router(fallback_router)
 
 
