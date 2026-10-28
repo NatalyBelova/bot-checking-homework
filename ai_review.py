@@ -454,11 +454,15 @@ async def check_homework(homework_id, material=None):
                 return await _jira_unsure(homework_id, version_id, "все присланные задачи завёл другой человек: "
                                           + ", ".join(f"{i.key} ({i.reporter_name})" for i in foreign))
         content = await build_input(hw, assignment, versions, material, already_counted)
-        if foreign:
-            content.append(_text_part(
-                "Задачи " + ", ".join(i.key for i in foreign) + " завёл другой человек — их не проверяй "
-                "и не упоминай, бот обработает их сам."))
-        model_kwargs = {"text_format": JiraVerdict, "extra_instructions": JIRA_PROMPT} if is_jira else {}
+        model_kwargs = {}
+        if is_jira:
+            extra = JIRA_PROMPT
+            if foreign:
+                # пометка бота — в инструкциях, а не рядом с работой: иначе модель примет её за слова ученика
+                extra += ("\nЗадачи " + ", ".join(i.key for i in foreign) + " из текста ученика завёл другой "
+                          "человек: бот не передал их тебе и обработает сам. Не добавляй их в bugs и не "
+                          "упоминай в ответе — это не нарушение со стороны ученика.\n")
+            model_kwargs = {"text_format": JiraVerdict, "extra_instructions": extra}
         try:
             verdict, tokens_in, tokens_out = await call_model(content, **model_kwargs)
         except Exception as e:
