@@ -352,14 +352,39 @@ async def invite_user(email):
 
 
 async def remove_user(account_id):
-    """Убирает человека из Jira (освобождает место). Задачи и история остаются."""
+    """Убирает человека из Jira и освобождает место. Задачи и история остаются.
+
+    Jira не даёт удалить человека, у которого были задачи (даже удалённые), — тогда отключаем ему
+    доступ: убираем из всех групп (так же выглядит «деактивация» в админке, место освобождается).
+    Возвращает 'deleted' или 'access_removed'.
+    """
     if not enabled():
         raise JiraError("Jira не подключена к боту", kind="config")
     async with _write_session() as session:
         async with session.delete(f"{_base()}/rest/api/3/user", params={"accountId": account_id}) as response:
             if response.status in (200, 204, 404):
-                return
-            raise _admin_error(response.status, await _error_text(response))
+                return "deleted"
+            if response.status != 400:
+                raise _admin_error(response.status, await _error_text(response))
+            log.info("Jira: удалить %s нельзя (%s) — отключаю доступ", account_id, await _error_text(response))
+
+        async with session.get(f"{_base()}/rest/api/3/user/groups", params={"accountId": account_id}) as response:
+            if response.status >= 400:
+                raise _admin_error(response.status, await _error_text(response))
+            groups = await response.json()
+        failed = []
+        for g in groups:
+            params = {"accountId": account_id}
+            if g.get("groupId"):
+                params["groupId"] = g["groupId"]
+            else:
+                params["groupname"] = g.get("name")
+            async with session.delete(f"{_base()}/rest/api/3/group/user", params=params) as response:
+                if response.status not in (200, 204, 404):
+                    failed.append(f"{g.get('name')}: {await _error_text(response)}")
+        if failed:
+            raise JiraError("не удалось отключить доступ — " + "; ".join(failed), kind="config")
+    return "access_removed"
 
 
 async def issues_by_reporter(account_id, projects):

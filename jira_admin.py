@@ -141,12 +141,14 @@ async def remove_user_confirm(callback: types.CallbackQuery):
 
 async def _remove_account(account_id, by, label):
     try:
-        await jira.remove_user(account_id)
+        how = await jira.remove_user(account_id)
     except jira.JiraError as e:
         log.warning("Jira: не удалось удалить %s: %s", label, e)
         return f"⚠️ Не получилось удалить {label} из Jira: {e}"
     await db.mark_jira_user_removed(account_id, f"human:{by}")
-    log.info("Jira: удалён %s (%s), подтвердил %s", label, account_id, by)
+    log.info("Jira: удалён %s (%s, %s), подтвердил %s", label, account_id, how, by)
+    if how == "access_removed":
+        return f"✅ {label}: доступ к Jira отключён, место освобождено (его задачи и история остаются)"
     return f"✅ {label} удалён из Jira"
 
 
