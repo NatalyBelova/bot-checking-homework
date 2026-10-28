@@ -183,6 +183,7 @@ MIGRATIONS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_jira_bugs_homework ON jira_bugs(homework_id)",
+    "ALTER TABLE homeworks ADD COLUMN IF NOT EXISTS jira_owner TEXT",  # accountId ученика в Jira
     """
     CREATE TABLE IF NOT EXISTS jira_users (
         id SERIAL PRIMARY KEY,
@@ -432,7 +433,7 @@ def get_homework(homework_id):
             """
             SELECT h.id, h.student_id, h.student_name, h.status, h.current_version,
                    h.assignment_id, a.title AS assignment_title, a.kind AS assignment_kind,
-                   h.created_at, h.updated_at
+                   h.created_at, h.updated_at, h.jira_owner
             FROM homeworks h
             LEFT JOIN assignments a ON a.id = h.assignment_id
             WHERE h.id=%s
@@ -991,4 +992,26 @@ def mark_jira_user_removed(account_id, removed_by):
 def jira_bug_keys(homework_id):
     with _cursor() as cursor:
         cursor.execute("SELECT DISTINCT issue_key FROM jira_bugs WHERE homework_id=%s", (homework_id,))
+        return [row[0] for row in cursor.fetchall()]
+
+
+@_async
+def set_jira_owner(homework_id, account_id):
+    with _cursor() as cursor:
+        cursor.execute("UPDATE homeworks SET jira_owner=%s WHERE id=%s AND jira_owner IS NULL",
+                       (account_id, homework_id))
+
+
+@_async
+def jira_accounts_of_student(student_id):
+    """accountId, которые уже связаны с этим учеником (через /jira или прошлые ДЗ блока 5)."""
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT account_id FROM jira_users WHERE student_id=%s AND removed_at IS NULL AND account_id IS NOT NULL
+            UNION
+            SELECT jira_owner FROM homeworks WHERE student_id=%s AND jira_owner IS NOT NULL
+            """,
+            (student_id, student_id),
+        )
         return [row[0] for row in cursor.fetchall()]

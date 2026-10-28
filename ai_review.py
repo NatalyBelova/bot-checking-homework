@@ -143,7 +143,9 @@ TEMPLATE_FIELDS = [
     ("extra", "Дополнительные параметры"),
 ]
 REJECTED_TEXT = "Этот баг не идёт в зачёт: он некритичный или это не тот баг, который нужно найти."
-BUG_STATUS_STUDENT = {"counted": "✅ засчитан", "fix": "🔧 нужно доработать", "rejected": "❌ не засчитывается"}
+BUG_STATUS_STUDENT = {"counted": "✅ засчитан", "fix": "🔧 нужно доработать", "rejected": "❌ не засчитывается",
+                      "foreign": "🚫 не засчитывается"}
+FOREIGN_TEXT = "Эту задачу завёл другой человек. Засчитываются только баги, которые ты завёл в Jira сам."
 
 
 def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dict):
@@ -188,6 +190,9 @@ def render_jira_comment(verdict, bugs, counted_total, required, problems=(), ski
     for b in bugs:
         c = b["check"]
         lines += ["", f"🐞 {b['key']} — {BUG_STATUS_STUDENT[b['status']]}"]
+        if b["status"] == "foreign":
+            lines.append(FOREIGN_TEXT)
+            continue
         if b["status"] == "rejected":
             # причину от ИИ ученику не показываем: она может выдать список багов преподавателя
             lines.append(b["reason"] or REJECTED_TEXT)
@@ -210,6 +215,10 @@ def render_jira_note(verdict, bugs, counted_total, required):
     marks = {"counted": "✅ засчитан", "fix": "🔧 правки", "rejected": "❌ не засчитан"}
     lines = [f"Засчитано всего: {counted_total} из {required}"]
     for b in bugs:
+        if b["status"] == "foreign":
+            lines.append(f"• {b['key']}: ⚠️ чужая задача (автор {b.get('reporter_name') or b.get('reporter_id')}) "
+                         "— не засчитана и не удаляется")
+            continue
         num = f"№{b['bug_number']}" if b["bug_number"] is not None else "не из списка"
         extra = f" — {b['reason']}" if b["reason"] else ""
         note = b["check"].reviewer_note.strip()
@@ -413,6 +422,16 @@ async def check_homework(homework_id, material=None):
         if material is None:
             skip = await db.deleted_issue_keys(homework_id) if is_jira else ()
             material = await gather_material(versions[-1], assignment["kind"], skip)
+        foreign = []
+        if is_jira:
+            owner, problem = await resolve_owner(hw, material.jira_issues)
+            if owner is None and material.jira_issues:
+                return await _jira_unsure(homework_id, version_id, problem)
+            foreign = [i for i in material.jira_issues if i.reporter_id != owner]
+            material.jira_issues = [i for i in material.jira_issues if i.reporter_id == owner]
+            if foreign and not material.jira_issues:
+                return await _jira_unsure(homework_id, version_id, "все присланные задачи завёл другой человек: "
+                                          + ", ".join(f"{i.key} ({i.reporter_name})" for i in foreign))
         content = await build_input(hw, assignment, versions, material, already_counted)
         model_kwargs = {"text_format": JiraVerdict, "extra_instructions": JIRA_PROMPT} if is_jira else {}
         try:
@@ -438,7 +457,7 @@ async def check_homework(homework_id, material=None):
 
     if is_jira:
         return await _finish_jira(homework_id, version_id, verdict, material, already_counted,
-                                  tokens_in, tokens_out)
+                                  tokens_in, tokens_out, foreign)
 
     final_verdict, guard_note = normalize_verdict(verdict)
     comment = verdict.comment_for_student.strip()
@@ -466,11 +485,53 @@ async def check_homework(homework_id, material=None):
     )
 
 
-async def _finish_jira(homework_id, version_id, verdict, material, already_counted, tokens_in, tokens_out):
+async def resolve_owner(hw, issues):
+    """Чьи задачи засчитывать: accountId ученика в Jira. Возвращает (owner или None, причина).
+
+    Ученик — это аккаунт, уже связанный с ним (добавлен через /jira и сдавал раньше), иначе
+    единственный автор задач в первой сдаче. Чужие задачи не засчитываются и не удаляются.
+    """
+    if hw.get("jira_owner"):
+        return hw["jira_owner"], None
+    reporters = {i.reporter_id for i in issues if i.reporter_id}
+    known = await db.jira_accounts_of_student(hw["student_id"])
+    if len(known) == 1:
+        owner = known[0]
+    elif len(known) > 1:
+        matching = [a for a in known if a in reporters]
+        if len(matching) != 1:
+            return None, "у ученика несколько аккаунтов Jira — непонятно, какой его"
+        owner = matching[0]
+    elif len(reporters) == 1:
+        owner = next(iter(reporters))
+    else:
+        names = sorted({f"{i.reporter_name or i.reporter_id}" for i in issues})
+        return None, ("в отправке задачи разных авторов (" + ", ".join(names)
+                      + ") — непонятно, какие из них завёл ученик")
+    row = await db.find_jira_user(account_id=owner)
+    if row and row["student_id"] and row["student_id"] != hw["student_id"]:
+        return None, f"автор задач ({row['email']}) уже связан с другим учеником"
+    await db.set_jira_owner(hw["id"], owner)
+    return owner, None
+
+
+async def _jira_unsure(homework_id, version_id, problem):
+    note = f"⚠️ Не проверяю автоматически: {problem}. Посмотри сам."
+    review_id = await db.add_ai_review(homework_id, version_id, verdict="unsure", note=note, model=OPENAI_MODEL)
+    log.info("ДЗ #%s (Jira): %s", homework_id, problem)
+    return AIResult(review_id=review_id, verdict="unsure", note=note)
+
+
+async def _finish_jira(homework_id, version_id, verdict, material, already_counted, tokens_in, tokens_out,
+                       foreign=()):
     issues_by_key = {i.key: i for i in material.jira_issues}
     # задачи, которые модель пропустила, не теряем — их посмотрит человек
     missed = [k for k in issues_by_key if k not in {b.key.strip().upper() for b in verdict.bugs}]
+    # задачи, которых не было в отправке (модель придумала ключ), не учитываем
+    verdict.bugs = [b for b in verdict.bugs if b.key.strip().upper() in issues_by_key]
     bugs, counted_total = judge_bugs(verdict, already_counted, issues_by_key)
+    bugs += [{"key": i.key, "bug_number": None, "status": "foreign", "reason": "", "reporter_id": i.reporter_id,
+              "reporter_name": i.reporter_name, "url": i.url, "check": None} for i in foreign]
     required = JIRA_REQUIRED_BUGS
     if verdict.unsure or missed or not bugs:
         final = "unsure"

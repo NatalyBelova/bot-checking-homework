@@ -239,9 +239,9 @@ async def apply_jira_effects(review, hw, confirmed_by):
         return
     homework_id = hw["id"]
     await db.save_jira_bugs(homework_id, review["id"], details["bugs"])
-    reporters = {b["reporter_id"] for b in details["bugs"] if b.get("reporter_id")}
-    if reporters:
-        await db.link_jira_users_to_student(reporters, hw["student_id"])
+    owner = (await db.get_homework(homework_id) or {}).get("jira_owner")
+    if owner:
+        await db.link_jira_users_to_student([owner], hw["student_id"])
 
     keys = await db.issues_to_delete(homework_id, review["id"])
     if keys:
@@ -265,9 +265,10 @@ async def final_cleanup_plan(homework_id):
     кого-то ещё, чьи задачи оказались в отправке.
     """
     known, unknown = [], []
-    for account_id in await db.reporters_for_homework(homework_id):
-        row = await db.find_jira_user(account_id=account_id)
-        (known if row else unknown).append((account_id, row))
+    owner = (await db.get_homework(homework_id) or {}).get("jira_owner")
+    if owner:  # только сам ученик, чужие авторы — никогда
+        row = await db.find_jira_user(account_id=owner)
+        (known if row else unknown).append((owner, row))
     return known, unknown
 
 
