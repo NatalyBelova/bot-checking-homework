@@ -488,8 +488,9 @@ async def check_homework(homework_id, material=None):
 async def resolve_owner(hw, issues):
     """Чьи задачи засчитывать: accountId ученика в Jira. Возвращает (owner или None, причина).
 
-    Ученик — это аккаунт, уже связанный с ним (добавлен через /jira и сдавал раньше), иначе
-    единственный автор задач в первой сдаче. Чужие задачи не засчитываются и не удаляются.
+    Ученик — это аккаунт, уже связанный с ним (сдавал раньше); иначе единственный автор задач
+    в первой сдаче; иначе единственный из авторов, кого добавили через /jira.
+    Чужие задачи не засчитываются и не удаляются.
     """
     if hw.get("jira_owner"):
         return hw["jira_owner"], None
@@ -505,6 +506,17 @@ async def resolve_owner(hw, issues):
     elif len(reporters) == 1:
         owner = next(iter(reporters))
     else:
+        owner = None
+    if owner is None and len(reporters) > 1:
+        # среди авторов ровно один добавлен через /jira и ещё ни с кем не связан — это и есть ученик
+        added = []
+        for account_id in reporters:
+            row = await db.find_jira_user(account_id=account_id)
+            if row and row["student_id"] in (None, hw["student_id"]):
+                added.append(account_id)
+        if len(added) == 1:
+            owner = added[0]
+    if owner is None:
         names = sorted({f"{i.reporter_name or i.reporter_id}" for i in issues})
         return None, ("в отправке задачи разных авторов (" + ", ".join(names)
                       + ") — непонятно, какие из них завёл ученик")
