@@ -107,7 +107,8 @@ extra — грамматика, опечатки и прочее.
 с counts = false и объясни в importance.
 unsure = true — только если не можешь разобрать работу в целом (тогда посмотрит человек).
 summary_for_student — 1–2 предложения: общее впечатление, на «ты», без упоминания ИИ и без \
-служебных слов (must_fix, counts, bugs, «засчитываемые баги»).
+служебных слов (must_fix, counts, bugs, «засчитываемые», «перечень», «зачётная категория»). Пол \
+ученика неизвестен: пиши без глаголов прошедшего времени с родом («в работе 3 задачи», а не «прислал»).
 """
 
 
@@ -200,6 +201,23 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
     return result, counted_total
 
 
+# слова, которые выдают список багов преподавателя или служебные поля — такое общее резюме не показываем
+LEAK_RE = re.compile(r"засчитываем|незасчитыв|перечн|перечен|списк|зачётн|зачетн|must|counts|bug_number|bugs\b|эталон",
+                     re.IGNORECASE)
+
+IMPORTANCE_TEXT = {
+    "counted": "✅ Значимый баг — засчитан.",
+    "fix": "✅ Значимый баг — засчитается, когда исправишь замечания ниже.",
+}
+
+
+def _student_field(bug, check, name):
+    # «Важность бага» ученику пишет код: текст модели может выдать, что у преподавателя есть список
+    if name == "importance":
+        return IMPORTANCE_TEXT[bug["status"]]
+    return getattr(check, name).strip() or "—"
+
+
 def render_jira_comment(verdict, bugs, counted_total, required, problems=(), skipped=()):
     head = f"Засчитано багов: {min(counted_total, required)} из {required}."
     if counted_total >= required:
@@ -207,8 +225,9 @@ def render_jira_comment(verdict, bugs, counted_total, required, problems=(), ski
     elif counted_total:
         head += f" Найди ещё {required - counted_total}."
     lines = [head]
-    if verdict.summary_for_student.strip():
-        lines += ["", verdict.summary_for_student.strip()]
+    summary = verdict.summary_for_student.strip()
+    if summary and not LEAK_RE.search(summary):
+        lines += ["", summary]
     for b in bugs:
         c = b["check"]
         lines += ["", f"🐞 {b['key']} — {BUG_STATUS_STUDENT[b['status']]}"]
@@ -220,7 +239,7 @@ def render_jira_comment(verdict, bugs, counted_total, required, problems=(), ski
             lines.append(b["reason"] or REJECTED_TEXT)
             lines.append("Эту задачу удалим из Jira — поищи другой баг.")
             continue
-        lines += [f"{label} — {getattr(c, name).strip() or '—'}" for name, label in TEMPLATE_FIELDS]
+        lines += [f"{label} — {_student_field(b, c, name)}" for name, label in TEMPLATE_FIELDS]
         if b["status"] == "fix":
             lines += ["Что исправить:"] + [f"• {x}" for x in c.must_fix]
             lines.append("Исправь задачу в Jira и пришли ссылку на неё снова.")
