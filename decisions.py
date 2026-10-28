@@ -251,7 +251,7 @@ async def apply_jira_effects(review, hw, confirmed_by):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
                 text=f"🗑 Удалить из Jira ({len(keys)})", callback_data=f"jdel_{homework_id}")]])
             await _send_reviewers(
-                f"ИИ разобрал баги по {homework_title(hw)} (ДЗ #{homework_id}) и отправил ученику.\n"
+                f"ИИ разобрал баги по {homework_title(hw)} и отправил ученику.\n"
                 f"Можно удалить из Jira: {', '.join(keys)}", keyboard)
 
     if review["verdict"] == "accept":
@@ -275,7 +275,7 @@ async def offer_final_cleanup(hw):
     homework_id = hw["id"]
     known, unknown = await final_cleanup_plan(homework_id)
     who = hw["student_name"] or f"id:{hw['student_id']}"
-    lines = [f"🎉 {who} нашёл все баги — {homework_title(hw)} принято (ДЗ #{homework_id})."]
+    lines = [f"🎉 {who} нашёл все баги — {homework_title(hw)} принято."]
     keyboard = None
     if known:
         lines.append("Удалить из Jira ученика (" + ", ".join(row["email"] for _, row in known)
