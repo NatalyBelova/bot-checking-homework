@@ -175,7 +175,11 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
         reason = ""
         if counted_set is not None:
             # засчитывается ли баг, решает список преподавателя, а не модель
-            check.counts = check.bug_number in counted_set
+            should = check.bug_number in counted_set
+            if should and not check.counts:
+                # модель решила иначе — её текст о важности бага вводил бы ученика в заблуждение
+                check.importance = "✅ Баг значимый, засчитается после исправления замечаний."
+            check.counts = should
         if not check.counts:
             status = "rejected"
         elif check.bug_number is not None and check.bug_number in seen:
