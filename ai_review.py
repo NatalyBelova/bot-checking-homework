@@ -75,6 +75,24 @@ class AIVerdict(BaseModel):
         description="Короткая заметка для проверяющего: почему такой вердикт, в чём сомнения. Можно пусто.")
 
 
+PLAIN_STYLE_MARKER = "не используй длинные тире"
+
+
+def plain_style(text):
+    """Убирает оформление, которое преподаватель запретил в стиле ответа: длинные тире, скобки,
+    звёздочки, подчёркивания, стрелочки; «1)» превращает в «1.». Модель иногда их всё равно ставит."""
+    text = re.sub(r"(?m)^(\s*\d+)\)\s*", r"\1. ", text)          # 1) пункт → 1. пункт
+    text = re.sub(r"\s*[—–]\s*", ", ", text)                          # длинные тире → запятая
+    text = re.sub(r"\s*(?:→|->|=>|⇒)\s*", ", ", text)                  # стрелочки
+    text = re.sub(r"\(([^()]*)\)", r"\1", text)                       # (пояснение) → пояснение
+    text = text.replace("(", "").replace(")", "").replace("*", "").replace("_", " ")
+    text = re.sub(r",\s*,", ",", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"(?m)^,\s*", "", text)
+    text = re.sub(r"(?m)[ \t]+$", "", text)
+    return text.strip()
+
+
 def normalize_verdict(v: AIVerdict):
     """Вердикт должен следовать из списка нарушений — это проверяет код, а не модель.
 
@@ -524,6 +542,8 @@ async def check_homework(homework_id, material=None):
         # текст писался как «исправь…» — для принятия собираем его из советов
         tips = "\n".join(f"• {t}" for t in verdict.suggestions[:3])
         comment = "зачёт" + (f"\n\nна будущее:\n{tips}" if tips else "")
+    if PLAIN_STYLE_MARKER in (assignment["reference"] or "").lower():
+        comment = plain_style(comment)
     note = " ".join(x for x in (guard_note, verdict.note_for_reviewer.strip()) if x)
 
     score = min(10, max(1, int(verdict.score))) if verdict.score is not None else None
