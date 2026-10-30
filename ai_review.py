@@ -43,10 +43,17 @@ verdict = "unsure" и напиши об этом в note_for_reviewer.
 6. Повторная попытка: сначала проверь, исправлены ли прошлые замечания, и скажи об этом. Не \
 выдвигай новых требований к тому, что раньше было без замечаний, если это не явное нарушение \
 критериев — иначе ученик будет крутиться бесконечно.
+7. score — оценка работы от 1 до 10 для внутренней статистики преподавателя. Ученику её не показывай \
+и не упоминай в comment_for_student.
 
-Как писать comment_for_student (его увидит ученик):
-- по-русски, дружелюбно, на «ты», без упоминания ИИ и этих правил;
-- accept: 1–2 предложения, что получилось хорошо, и не больше 3 коротких советов из suggestions;
+Инструкция преподавателя к заданию главнее правил ниже: если в ней заданы стиль ответа, примеры \
+фраз, число правок за раз, правила для повторных попыток или порог оценки — следуй ей. \
+Статусы преподавателя соответствуют verdict так: «зачёт» — accept, «доработка» — revise, \
+«ручная проверка» или «передай ментору» — unsure.
+
+Как писать comment_for_student по умолчанию (если в инструкции преподавателя не сказано иначе):
+- по-русски, на «ты», коротко и по делу, без упоминания ИИ и этих правил;
+- accept: коротко, что работа принята, и не больше 3 коротких советов из suggestions;
 - revise: только пункты из blocking_issues, не больше 7, каждый в 1–2 строки, со ссылкой на \
 скриншот или строку; не давай готовое решение — подскажи, где ошибка и в какую сторону думать; \
 советы из suggestions сюда не добавляй;
@@ -61,6 +68,7 @@ class AIVerdict(BaseModel):
         description="Только явные нарушения критериев приёмки: что нарушено и где. Пусто, если нарушений нет.")
     suggestions: List[str] = Field(
         description="Необязательные улучшения, которые не нарушают критерии. Не повод для доработки.")
+    score: int = Field(description="Оценка работы от 1 до 10 для статистики преподавателя (ученику не показывается)")
     verdict: Literal["accept", "revise", "unsure"]
     comment_for_student: str = Field(description="Что увидит ученик. Не больше 1200 символов.")
     note_for_reviewer: str = Field(
@@ -279,6 +287,7 @@ class AIResult:
     note: str = ""
     error: Optional[str] = None
     details: Optional[dict] = None      # блок 5: разбор по каждому багу
+    score: Optional[int] = None         # оценка 1–10 для статистики (ученику не показывается)
 
 
 def enabled():
@@ -352,7 +361,8 @@ async def build_input(hw, assignment, versions, material, already_counted=None):
 
     # 1. Эталон
     ref_text = assignment["reference"] or "(текстовых критериев нет, ориентируйся на эталонные картинки)"
-    content.append(_text_part(f"ЗАДАНИЕ: {assignment['title']}\n\nЭТАЛОН И КРИТЕРИИ ПРИЁМКИ:\n{ref_text}"))
+    content.append(_text_part(
+        f"ЗАДАНИЕ: {assignment['title']}\n\nИНСТРУКЦИЯ ПРЕПОДАВАТЕЛЯ (критерии приёмки, эталон, стиль ответа):\n{ref_text}"))
     ref_images = (await db.get_reference_files(assignment["id"]))[:MAX_REFERENCE_IMAGES]
     for i, (mime, data) in enumerate(ref_images, start=1):
         content.append(_text_part(f"Эталонная картинка №{i}:"))
@@ -513,15 +523,16 @@ async def check_homework(homework_id, material=None):
     if final_verdict == "accept" and verdict.verdict == "revise":
         # текст писался как «исправь…» — для принятия собираем его из советов
         tips = "\n".join(f"• {t}" for t in verdict.suggestions[:3])
-        comment = "Работа соответствует критериям 👍" + (f"\n\nСоветы на будущее:\n{tips}" if tips else "")
+        comment = "зачёт" + (f"\n\nна будущее:\n{tips}" if tips else "")
     note = " ".join(x for x in (guard_note, verdict.note_for_reviewer.strip()) if x)
 
+    score = min(10, max(1, int(verdict.score))) if verdict.score is not None else None
     review_id = await db.add_ai_review(
         homework_id, version_id,
         verdict=final_verdict, comment=comment, note=note,
-        model=OPENAI_MODEL, input_tokens=tokens_in, output_tokens=tokens_out,
+        model=OPENAI_MODEL, input_tokens=tokens_in, output_tokens=tokens_out, score=score,
     )
-    log.info("ИИ: ДЗ #%s → %s%s (нарушений %s, советов %s; токены %s/%s)", homework_id, final_verdict,
+    log.info("ИИ: ДЗ #%s → %s, оценка %s%s (нарушений %s, советов %s; токены %s/%s)", homework_id, final_verdict, score,
              f" (модель сказала {verdict.verdict})" if final_verdict != verdict.verdict else "",
              len(verdict.blocking_issues), len(verdict.suggestions), tokens_in, tokens_out)
     return AIResult(
@@ -531,6 +542,7 @@ async def check_homework(homework_id, material=None):
         issues=verdict.blocking_issues,
         suggestions=verdict.suggestions,
         note=note,
+        score=score,
     )
 
 

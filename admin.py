@@ -83,7 +83,8 @@ async def stats(message: types.Message):
         lines += ["", f"🤖 ИИ-проверка: {mode}",
                   f"Проверок ИИ: {ai['total']} · ИИ решил сам: {ai['auto_applied']} · "
                   f"подтверждено человеком: {ai['confirmed']}"
-                  + (f" · ошибок: {ai['errors']}" if ai["errors"] else "")]
+                  + (f" · ошибок: {ai['errors']}" if ai["errors"] else "")
+                  + (f"\nСредняя оценка работ (по ИИ): {ai['avg_score']}/10" if ai.get("avg_score") else "")]
 
     if by_task:
         lines += ["", "По заданиям (✅ принято · 🔄 доработка · 🕐 проверка):"]

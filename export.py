@@ -119,12 +119,13 @@ def build_workbook(assignments, homeworks, versions):
 
     # --- Попытки ---
     ws = _sheet(wb, "Попытки",
-                ["№ ДЗ", "Попытка", "Дата", "Текст ученика", "Файлов", "Комментарий", "Кто проверил"],
-                [8, 9, 17, 50, 8, 60, 14])
+                ["№ ДЗ", "Попытка", "Дата", "Текст ученика", "Файлов", "Комментарий", "Кто проверил",
+                 "Оценка ИИ"],
+                [8, 9, 17, 50, 8, 60, 14, 11])
     for v in versions:
         ws.append([
             v["homework_id"], v["version_num"], _local(v["created_at"]), v["text"] or "",
-            v["files"], v["comment"] or "", _reviewer(v["reviewed_by"]),
+            v["files"], v["comment"] or "", _reviewer(v["reviewed_by"]), v.get("ai_score"),
         ])
         r = ws.max_row
         ws.cell(row=r, column=3).number_format = DATE_FORMAT

@@ -147,7 +147,8 @@ async def process_submission(homework_id, card_text, files):
         return
 
     # suggest-режим или спорный случай в auto — решает человек, ИИ подсказывает
-    lines = [card_text, "", f"🤖 ИИ {VERDICT_LABELS.get(result.verdict, result.verdict)}"]
+    lines = [card_text, "", f"🤖 ИИ {VERDICT_LABELS.get(result.verdict, result.verdict)}"
+             + (f" · оценка {result.score}/10" if result.score else "")]
     if mode == "auto" and too_many_attempts:
         lines.append(f"Это уже попытка №{hw['current_version']} — дальше решает человек.")
     if result.details:

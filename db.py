@@ -168,6 +168,7 @@ MIGRATIONS = [
     """,
     # --- блок 5 (Jira): разбор каждого бага и люди, добавленные в Jira через бота ---
     "ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS details JSONB",
+    "ALTER TABLE ai_reviews ADD COLUMN IF NOT EXISTS score SMALLINT",  # оценка ИИ 1–10 для статистики
     """
     CREATE TABLE IF NOT EXISTS jira_bugs (
         id SERIAL PRIMARY KEY,
@@ -692,7 +693,9 @@ def export_data():
             """
             SELECT v.homework_id, COALESCE(v.version_num, 0) AS version_num, v.created_at,
                    v.text, v.comment, v.reviewed_by,
-                   (SELECT COUNT(*) FROM version_files f WHERE f.version_id = v.id) AS files
+                   (SELECT COUNT(*) FROM version_files f WHERE f.version_id = v.id) AS files,
+                   (SELECT r.score FROM ai_reviews r WHERE r.version_id = v.id AND r.score IS NOT NULL
+                    ORDER BY r.id DESC LIMIT 1) AS ai_score
             FROM versions v
             ORDER BY v.homework_id, v.id
             """
@@ -738,17 +741,17 @@ def count_reference_files(assignment_id):
 
 @_async
 def add_ai_review(homework_id, version_id, verdict=None, comment=None, note=None,
-                  model=None, input_tokens=None, output_tokens=None, error=None, details=None):
+                  model=None, input_tokens=None, output_tokens=None, error=None, details=None, score=None):
     with _cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO ai_reviews (homework_id, version_id, verdict, comment, note, model,
-                                    input_tokens, output_tokens, error, details)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    input_tokens, output_tokens, error, details, score)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (homework_id, version_id, verdict, comment, note, model, input_tokens, output_tokens, error,
-             Json(details) if details is not None else None),
+             Json(details) if details is not None else None, score),
         )
         return cursor.fetchone()[0]
 
@@ -786,7 +789,8 @@ def ai_stats():
                    COUNT(*) FILTER (WHERE applied_by = 'ai') AS auto_applied,
                    COUNT(*) FILTER (WHERE applied_by LIKE 'ai+human:%%') AS confirmed,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                   COALESCE(SUM(output_tokens), 0) AS output_tokens
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   ROUND(AVG(score)::numeric, 1) AS avg_score
             FROM ai_reviews
             """
         )
