@@ -76,6 +76,15 @@ class AIVerdict(BaseModel):
 
 
 PLAIN_STYLE_MARKER = "не используй длинные тире"
+# «если работа на 7 или выше … ставь зачёт» — порог оценки из инструкции преподавателя
+PASS_SCORE_RE = re.compile(r"работа на (\d+)(?: или \d+)? (?:балл\w* )?или выше|работа на (\d+) или (\d+) балл", re.IGNORECASE)
+
+
+def pass_score(reference):
+    match = PASS_SCORE_RE.search(reference or "")
+    if not match:
+        return None
+    return int(next(g for g in match.groups() if g))
 
 
 def plain_style(text):
@@ -537,6 +546,14 @@ async def check_homework(homework_id, material=None):
                                   tokens_in, tokens_out, foreign, counted_numbers(assignment["reference"]))
 
     final_verdict, guard_note = normalize_verdict(verdict)
+    threshold = pass_score(assignment["reference"])
+    if (final_verdict == "revise" and threshold and verdict.score is not None
+            and verdict.score >= threshold):
+        # по правилу преподавателя с такой оценкой ставят зачёт, если нет критичных ошибок —
+        # ИИ противоречит сам себе, решает человек
+        final_verdict = "unsure"
+        guard_note = (f"ИИ поставил {verdict.score}/10 (по правилу преподавателя от {threshold} — зачёт, если нет "
+                      "критичных ошибок), но просит доработку. Посмотри замечания: критичные ли они?")
     comment = verdict.comment_for_student.strip()
     if final_verdict == "accept" and verdict.verdict == "revise":
         # текст писался как «исправь…» — для принятия собираем его из советов
