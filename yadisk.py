@@ -22,6 +22,8 @@ MAX_IMAGE_SIDE = 2000             # большие скриншоты умень
 
 TABLE_EXT = (".xlsx", ".xlsm", ".xls", ".csv")
 TEXT_EXT = (".txt", ".md", ".log", ".json", ".sql", ".yml", ".yaml")
+LINK_EXT = (".url", ".webloc")    # ярлыки-ссылки (Windows / macOS): в них ссылка на Google Таблицу, Jira и т.п.
+DOC_EXT = (".docx",)              # Word: текст и ссылки из него
 
 URL_RE = re.compile(r"https?://(?:disk\.yandex\.(?:ru|com|by|kz)|yadi\.sk|[\w.-]+\.disk\.yandex\.ru)/\S+", re.I)
 
@@ -33,6 +35,7 @@ class DiskFiles:
     texts: list = field(default_factory=list)      # [(имя, bytes)]
     unseen: list = field(default_factory=list)     # имена файлов, которые ИИ не увидит
     problems: list = field(default_factory=list)   # ссылки, которые не открылись
+    links: list = field(default_factory=list)      # ссылки из ярлыков .url и документов .docx
     urls: list = field(default_factory=list)       # какие ссылки обработаны здесь
 
 
@@ -43,6 +46,55 @@ def find_urls(text):
         if url not in urls:
             urls.append(url)
     return urls
+
+
+URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"']+")
+
+
+def shortcut_links(data):
+    """Ссылки из ярлыка: Windows .url (URL=…) или macOS .webloc (plist)."""
+    text = data.decode("utf-8", "ignore")
+    return [u.rstrip(".,;)") for u in URL_IN_TEXT_RE.findall(text)]
+
+
+def docx_text(data):
+    """(текст, ссылки) документа Word. Без сторонних библиотек: .docx — это zip с XML."""
+    import html
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            xml = z.read("word/document.xml").decode("utf-8", "ignore")
+            rels = z.read("word/_rels/document.xml.rels").decode("utf-8", "ignore") \
+                if "word/_rels/document.xml.rels" in z.namelist() else ""
+    except (zipfile.BadZipFile, KeyError):
+        return "", []
+    xml = re.sub(r"</w:p>", "\n", xml)
+    xml = re.sub(r"<w:tab/>", "\t", xml)
+    text = html.unescape(re.sub(r"<[^>]+>", "", xml)).strip()
+    links = re.findall(r'Target="(https?://[^"]+)"[^>]*TargetMode="External"', rels)
+    links += re.findall(r'TargetMode="External"[^>]*Target="(https?://[^"]+)"', rels)
+    links += URL_IN_TEXT_RE.findall(text)
+    seen, unique = set(), []
+    for u in (html.unescape(x).rstrip(".,;)") for x in links):
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+    return text, unique
+
+
+def add_link_file(result, name, data):
+    """Ярлык или .docx: ссылки — в result.links, а текст — ИИ, чтобы он видел, что ученик прислал."""
+    lower = name.lower()
+    if lower.endswith(LINK_EXT):
+        links = shortcut_links(data)
+        text = "Файл-ссылка, ведёт на: " + (", ".join(links) or "(ссылки нет)")
+    else:
+        text, links = docx_text(data)
+        if links:
+            text += "\n\nСсылки в документе: " + ", ".join(links)
+    result.links += [u for u in links if u not in result.links]
+    if text:
+        result.texts.append((name, text.encode("utf-8")))
 
 
 def _natural_key(name):
@@ -147,6 +199,8 @@ async def collect(text, max_images):
                     kind = "image"
                 elif lower.endswith(TABLE_EXT):
                     kind = "table"
+                elif lower.endswith(LINK_EXT + DOC_EXT):
+                    kind = "links"
                 elif lower.endswith(TEXT_EXT) or mime.startswith("text/"):
                     kind = "text"
                 else:
@@ -165,8 +219,11 @@ async def collect(text, max_images):
                     result.images.append((shown_mime, shown, name))
                 elif kind == "table":
                     result.tables.append((name, data))
+                elif kind == "links":
+                    add_link_file(result, name, data)
                 else:
                     result.texts.append((name, data))
-    log.info("Яндекс.Диск: картинок %s, таблиц %s, текстов %s, не показано %s, проблем %s",
-             len(result.images), len(result.tables), len(result.texts), len(result.unseen), len(result.problems))
+    log.info("Яндекс.Диск: картинок %s, таблиц %s, текстов %s, ссылок %s, не показано %s, проблем %s",
+             len(result.images), len(result.tables), len(result.texts), len(result.links), len(result.unseen),
+             len(result.problems))
     return result

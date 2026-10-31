@@ -10,7 +10,8 @@ import re
 import aiohttp
 
 from common import log, read_limited, sniff_image
-from yadisk import MAX_FILE_BYTES, MAX_FILES, TABLE_EXT, TEXT_EXT, DiskFiles, _natural_key, shrink_image
+from yadisk import (DOC_EXT, LINK_EXT, MAX_FILE_BYTES, MAX_FILES, TABLE_EXT, TEXT_EXT, DiskFiles, _natural_key,
+                    add_link_file, shrink_image)
 
 TITLE = "Google Drive"
 FOLDER_VIEW = "https://drive.google.com/embeddedfolderview"
@@ -101,7 +102,7 @@ async def collect(text, max_images):
             files.sort(key=lambda f: _natural_key(f[1] or ""))
             for file_id, name in files:
                 lower = (name or "").lower()
-                if name and not lower.endswith(IMAGE_EXT + TABLE_EXT + TEXT_EXT):
+                if name and not lower.endswith(IMAGE_EXT + TABLE_EXT + TEXT_EXT + LINK_EXT + DOC_EXT):
                     result.unseen.append(name)
                     continue
                 if name and lower.endswith(IMAGE_EXT) and len(result.images) >= max_images:
@@ -120,6 +121,8 @@ async def collect(text, max_images):
                         continue
                     mime, shown = shrink_image(data)
                     result.images.append((mime, shown, name))
+                elif lower.endswith(LINK_EXT + DOC_EXT):
+                    add_link_file(result, name, data)
                 elif lower.endswith(TABLE_EXT) or data[:2] == b"PK":
                     result.tables.append((name if lower.endswith(TABLE_EXT) else name + ".xlsx", data))
                 elif lower.endswith(TEXT_EXT):

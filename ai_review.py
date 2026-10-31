@@ -379,8 +379,11 @@ async def gather_material(version, kind=None, skip_issue_keys=()):
     # ссылки на Яндекс.Диск: папка со скриншотами или файл — скачиваем каждый файл отдельно,
     # и на папки Google Drive — так же
     clouds = []
+    links = []  # ссылки из ярлыков .url и документов .docx в папках: Google Таблица, Jira, папка Drive…
     for module in (yadisk, gdrive):
-        disk = await module.collect(version["text"] or "", MAX_STUDENT_IMAGES - len(material.images))
+        source = "\n".join([version["text"] or ""] + links)
+        disk = await module.collect(source, MAX_STUDENT_IMAGES - len(material.images))
+        links += [u for u in disk.links if u not in links]
         material.images += disk.images
         documents += disk.tables
         material.texts += [(name, decode_text(data)) for name, data in disk.texts]
@@ -388,21 +391,22 @@ async def gather_material(version, kind=None, skip_issue_keys=()):
         clouds.append(disk)
         if disk.urls:
             line = (f"📁 {module.TITLE}: скриншотов {len(disk.images)}, таблиц {len(disk.tables)}, "
-                    f"текстовых файлов {len(disk.texts)}")
+                    f"текстовых файлов {len(disk.texts)}" + (f", ссылок из ярлыков {len(disk.links)}" if disk.links else ""))
             if disk.unseen:
                 line += "; не открыто: " + ", ".join(disk.unseen[:10]) + (" …" if len(disk.unseen) > 10 else "")
             if disk.problems:
                 line += "; проблемы: " + "; ".join(disk.problems[:3])
             material.cloud_summary.append(line)
 
+    full_text = "\n".join([version["text"] or ""] + links)
     material.tables, material.problems = await sheets.collect_tables(
-        version["text"] or "", documents, skip_urls=[u for d in clouds for u in d.urls])
+        full_text, documents, skip_urls=[u for d in clouds for u in d.urls])
     material.problems += [p for d in clouds for p in d.problems]
     if kind == "jira":
         skip = set(skip_issue_keys)
-        material.jira_skipped = [k for k in jira.find_issue_keys(version["text"] or "") if k in skip]
+        material.jira_skipped = [k for k in jira.find_issue_keys(full_text) if k in skip]
         (material.jira_issues, material.jira_problems,
-         material.jira_config_problem) = await jira.collect_issues(version["text"] or "", skip)
+         material.jira_config_problem) = await jira.collect_issues(full_text, skip)
     return material
 
 
