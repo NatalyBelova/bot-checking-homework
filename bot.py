@@ -474,7 +474,12 @@ async def _ai_review_or_alert(callback):
         await deny_callback(callback)
         return None, None
     review = await db.get_ai_review(int(callback.data.split("_")[1]))
-    if not review or review["verdict"] not in ("accept", "revise"):
+    if not review:
+        # проверка ИИ удаляется вместе с версией, которую ученик заменил до проверки
+        await callback.answer(STALE_CARD, show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return None, None
+    if review["verdict"] not in ("accept", "revise"):
         await callback.answer("Предложение ИИ не найдено", show_alert=True)
         return None, None
     hw = await _pending_homework_or_alert(callback, review["homework_id"])
