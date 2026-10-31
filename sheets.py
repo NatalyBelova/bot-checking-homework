@@ -223,7 +223,7 @@ def is_spreadsheet_name(path):
 # Всё вместе
 # ---------------------------------------------------------------------------
 
-async def collect_tables(text, documents):
+async def collect_tables(text, documents, skip_urls=()):
     """Таблицы из ссылок в тексте и из присланных файлов.
 
     documents — список (filename, bytes) уже скачанных из Telegram файлов-таблиц.
@@ -232,8 +232,9 @@ async def collect_tables(text, documents):
     tables: List[Table] = []
     problems: List[str] = []
 
+    skip = {u.rstrip(".,;:!?)»") for u in skip_urls}
     for url in find_urls(text):
-        if classify_url(url) is None:
+        if classify_url(url) is None or url in skip:
             continue
         try:
             data, name = await fetch_url(url)

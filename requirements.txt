@@ -4,3 +4,4 @@ psycopg2-binary
 openpyxl
 tzdata
 openai==3.37.0
+pillow==11.3.0
