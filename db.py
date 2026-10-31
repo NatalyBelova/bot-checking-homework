@@ -1019,3 +1019,14 @@ def jira_accounts_of_student(student_id):
             (student_id, student_id),
         )
         return [row[0] for row in cursor.fetchall()]
+
+
+@_async
+def latest_homework_for_assignment(student_id, assignment_id):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            "SELECT id, status, current_version FROM homeworks WHERE student_id=%s AND assignment_id=%s "
+            "ORDER BY id DESC LIMIT 1",
+            (student_id, assignment_id),
+        )
+        return cursor.fetchone()

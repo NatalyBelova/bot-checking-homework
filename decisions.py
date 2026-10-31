@@ -115,6 +115,13 @@ async def process_submission(homework_id, card_text, files):
             log.info("ДЗ #%s: таблица не открылась, вернул ученику (%s)", homework_id, reason)
             return
 
+    if hw and hw["assignment_kind"] == "screenshots":
+        # в папке со скриншотами блока часто лежит и чек-лист — проверяем его как отдельное ДЗ
+        versions = await db.get_versions(homework_id)
+        material = await ai_review.gather_material(versions[-1], "screenshots")
+        if material.tables and await split_checklist(hw, versions[-1]):
+            material.tables = []
+
     mode = settings.ai_mode()
     if mode == "off":
         await notify_reviewers(card_text, files, homework_id)
@@ -288,3 +295,41 @@ async def offer_final_cleanup(hw):
         lines.append("Автора задач не добавляли в Jira через бота — его бот не удаляет. "
                      "Удали ученика из Jira вручную.")
     await _send_reviewers("\n".join(lines), keyboard)
+
+
+# ---------------------------------------------------------------------------
+# Чек-лист внутри сдачи скриншотов
+# ---------------------------------------------------------------------------
+
+async def split_checklist(hw, version):
+    """Таблица в сдаче блока → отдельное ДЗ по заданию-чек-листу. True, если таблицу забрали туда."""
+    checklists = [a for a in await db.list_assignments(active_only=True) if a["kind"] == "checklist"]
+    if not checklists:
+        return False
+    checklist = checklists[0]
+    student_id = hw["student_id"]
+    who = hw["student_name"] or f"id:{student_id}"
+    existing = await db.latest_homework_for_assignment(student_id, checklist["id"])
+    if existing and existing["status"] in ("accepted", "new"):
+        # уже принят или уже проверяется — второй раз не заводим
+        return existing["status"] == "new"
+
+    text, files = version["text"] or "", version["files"]
+    if existing:
+        num = await db.add_version(existing["id"], text, files)
+        homework_id = existing["id"]
+        child = await db.get_homework(homework_id)
+        header = (f"🔄 Доработка (попытка {num}) по {homework_title(child)} от {who} — "
+                  f"таблица из сдачи {homework_title(hw)}")
+    else:
+        homework_id = await db.create_homework(student_id, checklist["id"], text, files, student_name=hw["student_name"])
+        child = await db.get_homework(homework_id)
+        header = f"🆕 Новое ДЗ #{homework_id} «{checklist['title']}» от {who} — таблица из сдачи {homework_title(hw)}"
+    log.info("ДЗ #%s: найдена таблица — проверяю её как чек-лист в ДЗ #%s", hw["id"], homework_id)
+    try:
+        await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица — отправила её на "
+                                    f"проверку как {homework_title(child)}. Результат придёт отдельно.")
+    except Exception:
+        log.exception("Не удалось написать ученику %s про чек-лист", student_id)
+    start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
+    return True
