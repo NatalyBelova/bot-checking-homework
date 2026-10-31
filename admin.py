@@ -222,7 +222,7 @@ async def _send_homework_card(chat_id, homework_id, viewer_id, bot_message):
             buttons.append([_btn(f"📎 Файлы попытки {n} ({len(v['files'])})", f"vf_{v['id']}")])
 
     if hw["status"] == "new" and is_reviewer(viewer_id):
-        buttons += review_keyboard(homework_id).inline_keyboard
+        buttons += review_keyboard(homework_id, versions[-1]["id"] if versions else None).inline_keyboard
     buttons.append([_btn("👤 Все ДЗ ученика", f"st_{hw['student_id']}")])
 
     await bot_message.answer(clip("\n".join(lines)),

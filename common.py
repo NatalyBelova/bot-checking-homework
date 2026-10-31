@@ -183,13 +183,15 @@ def student_keyboard():
     )
 
 
-def review_keyboard(homework_id):
+def review_keyboard(homework_id, version_id=None):
+    # id версии в кнопке: если ученик заменит работу до проверки, старая карточка не примет новую версию вслепую
+    suffix = f"{homework_id}_{version_id}" if version_id else f"{homework_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="Принять", callback_data=f"accept_{homework_id}"),
-            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{homework_id}"),
+            InlineKeyboardButton(text="Принять", callback_data=f"accept_{suffix}"),
+            InlineKeyboardButton(text="💬 Принять с комментарием", callback_data=f"commentaccept_{suffix}"),
         ],
-        [InlineKeyboardButton(text="Доработка", callback_data=f"revise_{homework_id}")],
+        [InlineKeyboardButton(text="Доработка", callback_data=f"revise_{suffix}")],
     ])
 
 
@@ -273,7 +275,8 @@ async def send_files(chat_id, files):
 
 
 async def notify_reviewers(text, files, homework_id, extra_rows=None):
-    keyboard = review_keyboard(homework_id)
+    import db  # здесь, а не наверху: db не должен зависеть от common при старте
+    keyboard = review_keyboard(homework_id, await db.get_latest_version_id(homework_id))
     if extra_rows:
         keyboard = InlineKeyboardMarkup(inline_keyboard=list(extra_rows) + keyboard.inline_keyboard)
     for reviewer in REVIEWERS:

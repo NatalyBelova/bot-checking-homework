@@ -400,6 +400,31 @@ def add_version(homework_id, text, files):
 
 
 @_async
+def replace_pending_version(homework_id, text, files):
+    """Ученик прислал работу заново, пока прошлая ещё ждёт проверки: старую версию убираем, новая
+    встаёт на её место (номер попытки тот же — повторная отправка до проверки попыткой не считается).
+
+    У новой версии новый id — поэтому карточки и проверка ИИ по старой версии становятся устаревшими.
+    Возвращает (номер попытки, id старой версии) или None, если ДЗ уже не ждёт проверки.
+    """
+    with _cursor() as cursor:
+        cursor.execute("SELECT status FROM homeworks WHERE id=%s FOR UPDATE", (homework_id,))
+        row = cursor.fetchone()
+        if not row or row[0] != "new":
+            return None
+        cursor.execute(
+            "SELECT id, version_num FROM versions WHERE homework_id=%s ORDER BY id DESC LIMIT 1", (homework_id,))
+        old = cursor.fetchone()
+        if not old:
+            return None
+        old_id, num = old
+        cursor.execute("DELETE FROM versions WHERE id=%s", (old_id,))
+        _insert_version(cursor, homework_id, num, text, files)
+        cursor.execute("UPDATE homeworks SET updated_at=CURRENT_TIMESTAMP WHERE id=%s", (homework_id,))
+        return num, old_id
+
+
+@_async
 def update_status(homework_id, status):
     with _cursor() as cursor:
         cursor.execute(
@@ -1030,3 +1055,16 @@ def latest_homework_for_assignment(student_id, assignment_id):
             (student_id, assignment_id),
         )
         return cursor.fetchone()
+
+
+@_async
+def latest_version_has_ai_review(homework_id):
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT EXISTS (SELECT 1 FROM ai_reviews r WHERE r.version_id = (
+                SELECT id FROM versions WHERE homework_id=%s ORDER BY id DESC LIMIT 1))
+            """,
+            (homework_id,),
+        )
+        return cursor.fetchone()[0]

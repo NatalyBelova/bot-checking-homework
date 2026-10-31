@@ -190,8 +190,56 @@ async def add_to_submission(messages):
     )
 
 
+DUPLICATE_STATUS = {
+    "new": "ещё на проверке",
+    "revision": "на доработке",
+    "accepted": "уже принято",
+}
+
+
+def duplicate_keyboard(hw):
+    if hw["status"] == "accepted":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🆕 Да, отправить как новую работу", callback_data="sendnew")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send")],
+        ])
+    add = "✏️ Это доработка — добавить в ДЗ" if hw["status"] == "revision" else "♻️ Заменить работу в ДЗ"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{add} #{hw['id']}", callback_data=f"sendto_{hw['id']}")],
+        [InlineKeyboardButton(text="🆕 Это новая, отдельная работа", callback_data="sendnew")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send")],
+    ])
+
+
+def duplicate_question(hw):
+    title = homework_title(hw)
+    if hw["status"] == "accepted":
+        return f"По этому заданию {title} {DUPLICATE_STATUS['accepted']} ✅\nТочно отправить ещё раз как новую работу?"
+    if hw["status"] == "revision":
+        return (f"По этому заданию у тебя уже есть {title} — {DUPLICATE_STATUS['revision']}.\n"
+                "Если это исправленная работа, добавлю её туда как следующую попытку.")
+    extra = ("Новые баги допишу к уже отправленным." if hw["assignment_kind"] == "jira"
+             else "Прошлую версию ещё не проверили — проверим эту вместо неё, попытка не потратится.")
+    return f"По этому заданию у тебя уже есть {title} — {DUPLICATE_STATUS['new']}.\n{extra}"
+
+
 @dp.callback_query(F.data == "confirm_send")
 async def confirm_send(callback: types.CallbackQuery):
+    await _send(callback)
+
+
+@dp.callback_query(F.data == "sendnew")
+async def send_as_new(callback: types.CallbackQuery):
+    await _send(callback, choice="new")
+
+
+@dp.callback_query(F.data.startswith("sendto_"))
+async def send_to_existing(callback: types.CallbackQuery):
+    await _send(callback, choice=int(callback.data.split("_")[1]))
+
+
+async def _send(callback, choice=None):
+    """choice: None — обычная отправка; "new" — отдельным ДЗ; id ДЗ — добавить в это ДЗ."""
     user = callback.from_user
     await callback.message.edit_reply_markup(reply_markup=None)
 
@@ -200,10 +248,32 @@ async def confirm_send(callback: types.CallbackQuery):
         if state != SUBMIT or not (data.get("text") or data.get("files")):
             await callback.answer("Нечего отправлять", show_alert=True)
             return
+        existing = None
+        if data["mode"] != "revision" and data.get("assignment_id") and choice is None:
+            # по этому заданию уже есть работа — спрашиваем, куда положить
+            latest = await db.latest_homework_for_assignment(user.id, data["assignment_id"])
+            if latest:
+                existing = await db.get_homework(latest["id"])
+        if existing:
+            await callback.message.answer(duplicate_question(existing), reply_markup=duplicate_keyboard(existing))
+            await callback.answer()
+            return
         await db.clear_state(user.id)
 
     text, files = data.get("text", ""), data.get("files", [])
     user_display = get_user_display(user)
+
+    if isinstance(choice, int):
+        hw = await db.get_homework(choice)
+        done = None
+        if hw and hw["student_id"] == user.id and hw["status"] in ("new", "revision"):
+            done = await decisions.add_to_existing(hw, text, files, user_display)
+        if done:
+            await callback.message.answer(f"Готово ✅ {done[:1].upper()}{done[1:]}.", reply_markup=student_keyboard())
+            await callback.answer()
+            return
+        # пока ученик выбирал, ДЗ проверили — отправляем отдельной работой, чтобы ничего не потерялось
+        data["mode"] = "new"
 
     if data["mode"] == "revision":
         homework_id = data["homework_id"]
@@ -241,7 +311,16 @@ async def cancel_send(callback: types.CallbackQuery):
 # Проверяющий
 # ---------------------------------------------------------------------------
 
-async def _pending_homework_or_alert(callback, homework_id):
+STALE_CARD = "Ученик заменил работу до проверки — эта карточка устарела, новая пришла отдельно"
+
+
+def _card_version(callback):
+    """id версии из кнопки карточки (accept_<ДЗ>_<версия>); у старых карточек его нет."""
+    parts = callback.data.split("_")
+    return int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+
+
+async def _pending_homework_or_alert(callback, homework_id, version_id=None):
     hw = await db.get_homework(homework_id)
     if not hw:
         await callback.answer("ДЗ не найдено", show_alert=True)
@@ -249,6 +328,10 @@ async def _pending_homework_or_alert(callback, homework_id):
     if hw["status"] != "new":
         await callback.answer(f"ДЗ #{homework_id} уже проверено: {STATUS_LABELS.get(hw['status'], hw['status'])}",
                               show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return None
+    if version_id and version_id != await db.get_latest_version_id(homework_id):
+        await callback.answer(STALE_CARD, show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
         return None
     return hw
@@ -260,7 +343,7 @@ async def accept(callback: types.CallbackQuery):
         await deny_callback(callback)
         return
     homework_id = int(callback.data.split("_")[1])
-    hw = await _pending_homework_or_alert(callback, homework_id)
+    hw = await _pending_homework_or_alert(callback, homework_id, _card_version(callback))
     if not hw:
         return
 
@@ -275,13 +358,14 @@ async def _start_review(callback, action):
         await deny_callback(callback)
         return
     homework_id = int(callback.data.split("_")[1])
-    hw = await _pending_homework_or_alert(callback, homework_id)
+    hw = await _pending_homework_or_alert(callback, homework_id, _card_version(callback))
     if not hw:
         return
 
     await callback.message.edit_reply_markup(reply_markup=None)
     await db.set_state(callback.from_user.id, REVIEW,
-                       {"homework_id": homework_id, "action": action, "text": "", "files": []})
+                       {"homework_id": homework_id, "action": action, "text": "", "files": [],
+                        "version_id": await db.get_latest_version_id(homework_id)})
     if action == "accept":
         await callback.message.answer(f"Напиши комментарий к принятому ДЗ #{homework_id}")
     else:
@@ -333,6 +417,10 @@ async def confirm_review(callback: types.CallbackQuery):
         await callback.message.answer(f"ДЗ #{homework_id} уже проверено, комментарий не отправлен")
         await callback.answer()
         return
+    if data.get("version_id") and data["version_id"] != await db.get_latest_version_id(homework_id):
+        await callback.message.answer(f"ДЗ #{homework_id}: {STALE_CARD.lower()}. Комментарий не отправлен")
+        await callback.answer()
+        return
 
     text, files = data.get("text", ""), data.get("files", [])
     reviewed_by = data.get("reviewed_by") or f"human:{reviewer_id}"
@@ -369,7 +457,7 @@ async def cancel_review(callback: types.CallbackQuery):
     if homework_id:
         await callback.message.answer(
             f"Отменено ❌ Что сделать с ДЗ #{homework_id}?",
-            reply_markup=review_keyboard(homework_id),
+            reply_markup=review_keyboard(homework_id, data.get("version_id")),
         )
     else:
         await callback.message.answer("Отменено ❌")
@@ -423,6 +511,7 @@ async def ai_edit_suggestion(callback: types.CallbackQuery):
     await db.set_state(callback.from_user.id, REVIEW, {
         "homework_id": hw["id"], "action": review["verdict"], "text": "", "files": [],
         "ai_review_id": review["id"], "reviewed_by": f"ai+human:{callback.from_user.id}",
+        "version_id": review["version_id"],
     })
     action = "принятия" if review["verdict"] == "accept" else "доработки"
     await callback.message.answer(

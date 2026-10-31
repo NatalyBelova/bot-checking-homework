@@ -5,7 +5,7 @@ import ai_review
 import db
 import jira
 from common import (
-    SUBMIT, fix_keyboard, homework_title, is_reviewer, log, notify_reviewers, send_files, send_long,
+    SUBMIT, fix_keyboard, homework_title, is_reviewer, log, merge_text, notify_reviewers, send_files, send_long,
 )
 from config import REVIEWERS
 import settings
@@ -61,11 +61,22 @@ def start_processing(homework_id, card_text, files):
 
 
 async def _process_submission(homework_id, card_text, files):
+    version_id = await db.get_latest_version_id(homework_id)
     try:
-        await process_submission(homework_id, card_text, files)
+        await process_submission(homework_id, card_text, files, version_id)
     except Exception:
+        if await _replaced(homework_id, version_id):
+            return
         log.exception("Ошибка обработки ДЗ #%s — отправляю проверяющему как есть", homework_id)
         await notify_reviewers(card_text, files, homework_id)
+
+
+async def _replaced(homework_id, version_id):
+    """Пока шла проверка, ученик заменил работу — результат по старой версии никому не нужен."""
+    if version_id and version_id != await db.get_latest_version_id(homework_id):
+        log.info("ДЗ #%s: версия %s заменена учеником — результат проверки отбрасываю", homework_id, version_id)
+        return True
+    return False
 
 
 CHECKLIST_HINT = (
@@ -82,7 +93,7 @@ JIRA_HINT = (
 )
 
 
-async def process_submission(homework_id, card_text, files):
+async def process_submission(homework_id, card_text, files, version_id=None):
     material = None
     hw = await db.get_homework(homework_id)
     if hw and hw["assignment_kind"] == "jira":
@@ -95,6 +106,8 @@ async def process_submission(homework_id, card_text, files):
                 "Проверь вручную.", files, homework_id)
             return
         if not material.jira_issues and not material.images:
+            if await _replaced(homework_id, version_id):
+                return
             reason = "; ".join(material.jira_problems)
             problem = (f"Не получилось открыть твои баг-репорты: {reason}." if reason
                        else "В отправке нет ссылок на задачи Jira.")
@@ -107,6 +120,8 @@ async def process_submission(homework_id, card_text, files):
         versions = await db.get_versions(homework_id)
         material = await ai_review.gather_material(versions[-1])
         if not material.tables and not material.images:
+            if await _replaced(homework_id, version_id):
+                return
             reason = "; ".join(material.problems)
             problem = (f"Не получилось открыть твою таблицу: {reason}." if reason
                        else "В отправке нет ссылки на таблицу или файла .xlsx.")
@@ -122,6 +137,8 @@ async def process_submission(homework_id, card_text, files):
             # в других блоках таблицы — часть самого блока (например, практика API в блоке 1–2)
             versions = await db.get_versions(homework_id)
             material = await ai_review.gather_material(versions[-1], "screenshots")
+            if await _replaced(homework_id, version_id):
+                return
             if material.tables and await split_checklist(hw, versions[-1]):
                 material.tables = []
 
@@ -138,6 +155,8 @@ async def process_submission(homework_id, card_text, files):
     hw = await db.get_homework(homework_id)
     if not hw or hw["status"] != "new":
         return  # пока ИИ думал, ДЗ уже проверили вручную
+    if await _replaced(homework_id, version_id):
+        return
 
     if result.error:
         await notify_reviewers(
@@ -186,6 +205,48 @@ async def process_submission(homework_id, card_text, files):
                                   callback_data=f"aiedit_{result.review_id}")],
         ]
     await notify_reviewers("\n".join(lines), files, homework_id, extra_rows=extra)
+
+
+# ---------------------------------------------------------------------------
+# Повторная отправка по заданию, где уже есть непринятая работа
+# ---------------------------------------------------------------------------
+
+async def add_to_existing(hw, text, files, who, source=""):
+    """Кладёт отправку ученика в уже открытое ДЗ вместо нового.
+
+    На доработке — это следующая попытка. Ещё не проверено — новая версия заменяет старую и попыткой
+    не считается (в блоке 5 баги сдают порциями, поэтому там прошлую порцию дописываем, а не теряем).
+    Возвращает текст для ученика или None, если ДЗ тем временем уже проверили.
+    """
+    title = homework_title(hw)
+    if hw["status"] == "revision":
+        num = await db.add_version(hw["id"], text, files)
+        if num is None:
+            return None
+        header = f"🔄 Доработка (попытка {num}) по {title} от {who}{source}"
+        student_text = f"добавила к {title} как попытку {num}"
+    elif hw["status"] == "new":
+        had_card = settings.ai_mode() == "off" or await db.latest_version_has_ai_review(hw["id"])
+        if hw["assignment_kind"] == "jira":
+            versions = await db.get_versions(hw["id"])
+            if versions:
+                text = merge_text(versions[-1]["text"] or "", text)
+                files = list(versions[-1]["files"]) + list(files)
+        replaced = await db.replace_pending_version(hw["id"], text, files)
+        if replaced is None:
+            return None
+        num = replaced[0]
+        header = f"♻️ {title} от {who} — новая версия вместо непроверенной (попытка {num}){source}"
+        if had_card:
+            await _send_reviewers(f"♻️ {title}: ученик прислал новую версию, пока прошлую не проверили. "
+                                  "Прошлая карточка устарела — новая придёт отдельно.")
+        student_text = (f"дописала к {title}, проверим всё вместе" if hw["assignment_kind"] == "jira"
+                        else f"заменила работу в {title}: прошлую версию ещё не проверили, проверим новую")
+    else:
+        return None
+    log.info("ДЗ #%s: отправка ученика добавлена к открытому ДЗ (статус был %s)", hw["id"], hw["status"])
+    start_processing(hw["id"], f"{header}\n\n{text}".strip(), files)
+    return student_text
 
 
 RECOVERY_DELAY = 180  # сек после старта: старый контейнер при деплое успевает доделать свои проверки
@@ -316,29 +377,33 @@ async def split_checklist(hw, version):
     student_id = hw["student_id"]
     who = hw["student_name"] or f"id:{student_id}"
     existing = await db.latest_homework_for_assignment(student_id, checklist["id"])
-    if existing and existing["status"] in ("accepted", "new"):
-        # уже принят или уже проверяется — второй раз не заводим, но говорим об этом
+    text, files = version["text"] or "", version["files"]
+    source = f" — таблица из сдачи {homework_title(hw)}"
+    if existing and existing["status"] in ("new", "revision"):
         child = await db.get_homework(existing["id"])
-        why = "уже принят" if existing["status"] == "accepted" else "уже на проверке"
-        log.info("ДЗ #%s: таблица есть, но чек-лист %s (ДЗ #%s)", hw["id"], why, existing["id"])
+        done = await add_to_existing(child, text, files, who, source)
+        if done:
+            try:
+                await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица — {done}. "
+                                            "Результат придёт отдельно.")
+            except Exception:
+                log.exception("Не удалось написать ученику %s про чек-лист", student_id)
+            return True
+        existing = await db.latest_homework_for_assignment(student_id, checklist["id"])  # уже проверили
+    if existing and existing["status"] == "accepted":
+        # уже принят — второй раз не заводим, но говорим об этом
+        child = await db.get_homework(existing["id"])
+        log.info("ДЗ #%s: таблица есть, но чек-лист уже принят (ДЗ #%s)", hw["id"], existing["id"])
         try:
             await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица, но "
-                                        f"{homework_title(child)} {why} — повторно не отправляю.")
+                                        f"{homework_title(child)} уже принят — повторно не отправляю.")
         except Exception:
             log.exception("Не удалось написать ученику %s про чек-лист", student_id)
         return True
 
-    text, files = version["text"] or "", version["files"]
-    if existing:
-        num = await db.add_version(existing["id"], text, files)
-        homework_id = existing["id"]
-        child = await db.get_homework(homework_id)
-        header = (f"🔄 Доработка (попытка {num}) по {homework_title(child)} от {who} — "
-                  f"таблица из сдачи {homework_title(hw)}")
-    else:
-        homework_id = await db.create_homework(student_id, checklist["id"], text, files, student_name=hw["student_name"])
-        child = await db.get_homework(homework_id)
-        header = f"🆕 Новое ДЗ #{homework_id} «{checklist['title']}» от {who} — таблица из сдачи {homework_title(hw)}"
+    homework_id = await db.create_homework(student_id, checklist["id"], text, files, student_name=hw["student_name"])
+    child = await db.get_homework(homework_id)
+    header = f"🆕 Новое ДЗ #{homework_id} «{checklist['title']}» от {who}{source}"
     log.info("ДЗ #%s: найдена таблица — проверяю её как чек-лист в ДЗ #%s", hw["id"], homework_id)
     try:
         await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица — отправила её на "
