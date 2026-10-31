@@ -82,7 +82,15 @@ def google_export_url(url):
     return f"https://docs.google.com/spreadsheets/d/{match.group(1)}/export?format=xlsx"
 
 
+ONEDRIVE_NEW_RE = re.compile(r"^https?://1drv\.ms/\w/c/([0-9a-f]+)/([\w-]+)", re.I)
+
+
 def onedrive_download_url(url):
+    # новые ссылки 1drv.ms/x/c/<cid>/<token>: API shares с 2025 требует вход, а download.aspx — нет
+    match = ONEDRIVE_NEW_RE.match(url)
+    if match:
+        cid, share = match.groups()
+        return f"https://my.microsoftpersonalcontent.com/personal/{cid.lower()}/_layouts/15/download.aspx?share={share}"
     token = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
     return f"https://api.onedrive.com/v1.0/shares/u!{token}/root/content"
 

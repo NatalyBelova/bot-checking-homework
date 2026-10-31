@@ -94,6 +94,20 @@ def tidy_accept(comment):
     return f"{head}\nна будущее: {tips[0]}"
 
 
+MAX_TEXT_LINKS = 20
+
+
+def links_in_text(text):
+    """Ссылки на таблицы, папки и задачи из текстового файла ученика (не все подряд — в логах их много)."""
+    found = []
+    for url in yadisk.URL_IN_TEXT_RE.findall(text or ""):
+        url = url.rstrip(".,;:!?)»")
+        if (sheets.classify_url(url) or gdrive.find_links(url) or yadisk.find_urls(url)
+                or jira.find_issue_keys(url)) and url not in found:
+            found.append(url)
+    return found[:MAX_TEXT_LINKS]
+
+
 class AIVerdict(BaseModel):
     # Порядок полей важен: модель сначала разбирает нарушения, потом выносит вердикт
     blocking_issues: List[str] = Field(
@@ -392,6 +406,7 @@ async def gather_material(version, kind=None, skip_issue_keys=()):
     """Скачивает скриншоты, таблицы, текстовые файлы и (для заданий Jira) баг-репорты одной попытки."""
     material = Material()
     documents = []
+    text_links = []  # ссылки из присланных .txt — бывает, что ученик кладёт ссылку на таблицу в файл
     for file_type, file_id in version["files"]:
         file_kind, meta, data = await download_attachment(file_type, file_id)  # не путать с kind задания
         if file_kind == "image":
@@ -403,25 +418,29 @@ async def gather_material(version, kind=None, skip_issue_keys=()):
             documents.append((meta, data))
         elif file_kind == "text":
             material.texts.append((meta, decode_text(data)))
+            text_links += [u for u in links_in_text(decode_text(data)) if u not in text_links]
         else:
             material.unseen.append(meta)
 
     # ссылки на Яндекс.Диск: папка со скриншотами или файл — скачиваем каждый файл отдельно,
     # и на папки Google Drive — так же
     clouds = []
-    links = []  # ссылки из ярлыков .url и документов .docx в папках: Google Таблица, Jira, папка Drive…
+    links = list(text_links)  # ссылки из ярлыков .url, документов .docx и .txt: Google Таблица, OneDrive, Jira…
     for module in (yadisk, gdrive):
         source = "\n".join([version["text"] or ""] + links)
         disk = await module.collect(source, MAX_STUDENT_IMAGES - len(material.images))
-        links += [u for u in disk.links if u not in links]
         material.images += disk.images
         documents += disk.tables
         material.texts += [(name, decode_text(data)) for name, data in disk.texts]
+        for name, data in disk.texts:
+            if not name.lower().endswith(yadisk.LINK_EXT + yadisk.DOC_EXT):  # из ярлыков ссылки уже взяты
+                disk.links += [u for u in links_in_text(decode_text(data)) if u not in disk.links]
+        links += [u for u in disk.links if u not in links]
         material.unseen += disk.unseen
         clouds.append(disk)
         if disk.urls:
             line = (f"📁 {module.TITLE}: скриншотов {len(disk.images)}, таблиц {len(disk.tables)}, "
-                    f"текстовых файлов {len(disk.texts)}" + (f", ссылок из ярлыков {len(disk.links)}" if disk.links else ""))
+                    f"текстовых файлов {len(disk.texts)}" + (f", ссылок из файлов {len(disk.links)}" if disk.links else ""))
             if disk.unseen:
                 line += "; не открыто: " + ", ".join(disk.unseen[:10]) + (" …" if len(disk.unseen) > 10 else "")
             if disk.problems:
