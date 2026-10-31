@@ -236,9 +236,12 @@ async def add_to_existing(hw, text, files, who, source=""):
         if replaced is None:
             return None
         num = replaced[0]
-        header = f"♻️ {title} от {who} — новая версия вместо непроверенной (попытка {num}){source}"
+        jira_kind = hw["assignment_kind"] == "jira"
+        what = "дописал баги к непроверенной отправке" if jira_kind else "новая версия вместо непроверенной"
+        header = f"♻️ {title} от {who} — {what} (попытка {num}){source}"
         if had_card:
-            await _send_reviewers(f"♻️ {title}: ученик прислал новую версию, пока прошлую не проверили. "
+            sent = ("дописал баги" if jira_kind else "прислал новую версию")
+            await _send_reviewers(f"♻️ {title}: ученик {sent}, пока прошлую отправку не проверили. "
                                   "Прошлая карточка устарела — новая придёт отдельно.")
         student_text = (f"дописала к {title}, проверим всё вместе" if hw["assignment_kind"] == "jira"
                         else f"заменила работу в {title}: прошлую версию ещё не проверили, проверим новую")

@@ -203,7 +203,12 @@ def duplicate_keyboard(hw):
             [InlineKeyboardButton(text="🆕 Да, отправить как новую работу", callback_data="sendnew")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_send")],
         ])
-    add = "✏️ Это доработка — добавить в ДЗ" if hw["status"] == "revision" else "♻️ Заменить работу в ДЗ"
+    if hw["status"] == "revision":
+        add = "✏️ Это доработка — добавить в ДЗ"
+    elif hw["assignment_kind"] == "jira":
+        add = "➕ Дописать баги в ДЗ"
+    else:
+        add = "♻️ Заменить работу в ДЗ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{add} #{hw['id']}", callback_data=f"sendto_{hw['id']}")],
         [InlineKeyboardButton(text="🆕 Это новая, отдельная работа", callback_data="sendnew")],
