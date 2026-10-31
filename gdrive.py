@@ -12,6 +12,7 @@ import aiohttp
 from common import log, read_limited, sniff_image
 from yadisk import MAX_FILE_BYTES, MAX_FILES, TABLE_EXT, TEXT_EXT, DiskFiles, _natural_key, shrink_image
 
+TITLE = "Google Drive"
 FOLDER_VIEW = "https://drive.google.com/embeddedfolderview"
 DOWNLOAD = "https://drive.usercontent.google.com/download"
 MAX_DEPTH = 2

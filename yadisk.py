@@ -12,8 +12,10 @@ import aiohttp
 
 from common import log, read_limited, sniff_image
 
+TITLE = "Яндекс.Диск"
 API = "https://cloud-api.yandex.net/v1/disk/public/resources"
-MAX_FILES = 60                    # сколько файлов смотрим в папке
+MAX_FILES = 200                   # сколько файлов смотрим в папке (весь блок — это 30–50 скриншотов + файлы)
+PAGE = 100                        # столько Яндекс отдаёт за один запрос списка
 MAX_DEPTH = 2                     # папки внутри папки
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_SIDE = 2000             # большие скриншоты уменьшаем — так быстрее и дешевле для ИИ
@@ -66,8 +68,8 @@ def shrink_image(data):
         return mime, data
 
 
-async def _meta(session, public_key, path=None):
-    params = {"public_key": public_key, "limit": str(MAX_FILES), "sort": "name"}
+async def _meta(session, public_key, path=None, offset=0):
+    params = {"public_key": public_key, "limit": str(PAGE), "offset": str(offset), "sort": "name"}
     if path:
         params["path"] = path
     async with session.get(API, params=params) as response:
@@ -79,20 +81,26 @@ async def _meta(session, public_key, path=None):
 
 
 async def _list_files(session, public_key, path=None, depth=0):
-    """Все файлы по ссылке (папка — рекурсивно, не глубже MAX_DEPTH)."""
+    """Все файлы по ссылке (папка — рекурсивно, не глубже MAX_DEPTH, постранично)."""
     meta = await _meta(session, public_key, path)
     if meta.get("type") == "file":
         return [meta]
-    files = []
-    for item in (meta.get("_embedded") or {}).get("items") or []:
-        if item.get("type") == "dir":
-            if depth < MAX_DEPTH:
-                files += await _list_files(session, public_key, item.get("path"), depth + 1)
-        else:
-            files.append(item)
-        if len(files) >= MAX_FILES:
+    files, offset = [], 0
+    while True:
+        embedded = meta.get("_embedded") or {}
+        items = embedded.get("items") or []
+        for item in items:
+            if item.get("type") == "dir":
+                if depth < MAX_DEPTH:
+                    files += await _list_files(session, public_key, item.get("path"), depth + 1)
+            else:
+                files.append(item)
+        offset += len(items)
+        total = embedded.get("total") or 0
+        if not items or offset >= total or len(files) >= MAX_FILES:
             break
-    return files
+        meta = await _meta(session, public_key, path, offset)
+    return files[:MAX_FILES]
 
 
 async def _download(session, item):

@@ -18,7 +18,7 @@ import yadisk
 from common import decode_text, download_attachment, log
 from config import JIRA_REQUIRED_BUGS, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_REASONING
 
-MAX_STUDENT_IMAGES = 40  # блок 3–4 сдаётся одним пакетом ≈ 25 скриншотов
+MAX_STUDENT_IMAGES = 60  # блок 3–4 из папки — это 30–50 скриншотов (SQL-тренажёр один даёт 11)
 MAX_REFERENCE_IMAGES = 10
 
 SYSTEM_PROMPT = """\
@@ -355,6 +355,7 @@ class Material:
     jira_skipped: list = field(default_factory=list)   # уже засчитанные и удалённые задачи
     problems: list = field(default_factory=list)  # почему что-то не открылось
     unseen: list = field(default_factory=list)    # вложения, которые ИИ не видит (видео, PDF…)
+    cloud_summary: list = field(default_factory=list)  # что достали из папок на дисках — для проверяющего
 
 
 async def gather_material(version, kind=None, skip_issue_keys=()):
@@ -385,6 +386,14 @@ async def gather_material(version, kind=None, skip_issue_keys=()):
         material.texts += [(name, decode_text(data)) for name, data in disk.texts]
         material.unseen += disk.unseen
         clouds.append(disk)
+        if disk.urls:
+            line = (f"📁 {module.TITLE}: скриншотов {len(disk.images)}, таблиц {len(disk.tables)}, "
+                    f"текстовых файлов {len(disk.texts)}")
+            if disk.unseen:
+                line += "; не открыто: " + ", ".join(disk.unseen[:10]) + (" …" if len(disk.unseen) > 10 else "")
+            if disk.problems:
+                line += "; проблемы: " + "; ".join(disk.problems[:3])
+            material.cloud_summary.append(line)
 
     material.tables, material.problems = await sheets.collect_tables(
         version["text"] or "", documents, skip_urls=[u for d in clouds for u in d.urls])
@@ -579,6 +588,8 @@ async def check_homework(homework_id, material=None):
     if PLAIN_STYLE_MARKER in (assignment["reference"] or "").lower():
         comment = plain_style(comment)
     note = " ".join(x for x in (guard_note, verdict.note_for_reviewer.strip()) if x)
+    if material.cloud_summary:
+        note = "\n".join([note] + material.cloud_summary).strip()
 
     score = min(10, max(1, int(verdict.score))) if verdict.score is not None else None
     review_id = await db.add_ai_review(
