@@ -116,11 +116,14 @@ async def process_submission(homework_id, card_text, files):
             return
 
     if hw and hw["assignment_kind"] == "screenshots":
-        # в папке со скриншотами блока часто лежит и чек-лист — проверяем его как отдельное ДЗ
-        versions = await db.get_versions(homework_id)
-        material = await ai_review.gather_material(versions[-1], "screenshots")
-        if material.tables and await split_checklist(hw, versions[-1]):
-            material.tables = []
+        assignment = await db.get_assignment(hw["assignment_id"])
+        if CHECKLIST_SPLIT_MARKER in ((assignment or {}).get("reference") or "").lower():
+            # в папке блока 3–4 лежит и чек-лист — проверяем его как отдельное ДЗ;
+            # в других блоках таблицы — часть самого блока (например, практика API в блоке 1–2)
+            versions = await db.get_versions(homework_id)
+            material = await ai_review.gather_material(versions[-1], "screenshots")
+            if material.tables and await split_checklist(hw, versions[-1]):
+                material.tables = []
 
     mode = settings.ai_mode()
     if mode == "off":
@@ -300,6 +303,9 @@ async def offer_final_cleanup(hw):
 # ---------------------------------------------------------------------------
 # Чек-лист внутри сдачи скриншотов
 # ---------------------------------------------------------------------------
+
+CHECKLIST_SPLIT_MARKER = "чек-лист в папке проверяется отдельно"
+
 
 async def split_checklist(hw, version):
     """Таблица в сдаче блока → отдельное ДЗ по заданию-чек-листу. True, если таблицу забрали туда."""
