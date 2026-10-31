@@ -55,13 +55,43 @@ verdict = "unsure" и напиши об этом в note_for_reviewer.
 
 Как писать comment_for_student по умолчанию (если в инструкции преподавателя не сказано иначе):
 - по-русски, на «ты», коротко и по делу, без упоминания ИИ и этих правил;
-- accept: коротко, что работа принята, и не больше 3 коротких советов из suggestions;
+- accept: коротко, что работа принята. Советов списком не давай: максимум один совет одной строкой \
+«на будущее: …», и только если он правда полезен. Ученик не должен подумать, что надо что-то \
+пересдавать. Остальные советы оставь в suggestions — их увидит проверяющий;
 - revise: только пункты из blocking_issues, не больше 7, каждый в 1–2 строки, со ссылкой на \
 скриншот или строку; не давай готовое решение — подскажи, где ошибка и в какую сторону думать; \
 советы из suggestions сюда не добавляй;
 - если работа состоит из нескольких тем (блок), группируй пункты по темам: «Docker: …»;
 - всего не больше 1200 символов.
 """
+
+
+TIP_HEAD_RE = re.compile(r"^\s*(советы|совет|на будущее|рекомендации)\s*:?\s*$", re.I)
+TIP_MARK_RE = re.compile(r"^\s*(?:\d+[.)]|[•\-–*])\s*")
+
+
+def tidy_accept(comment):
+    """Зачёт без списка советов: первая строка + не больше одного совета «на будущее».
+
+    Длинный список «советы: 1. 2. 3.» ученик читает как новую доработку и пересдаёт работу.
+    """
+    lines = [l.strip() for l in (comment or "").splitlines() if l.strip()]
+    if not lines:
+        return comment
+    head, rest = lines[0], lines[1:]
+    if not rest:
+        return head
+    tips = []
+    for line in rest:
+        if TIP_HEAD_RE.match(line):
+            continue
+        tip = TIP_MARK_RE.sub("", line)
+        tip = re.sub(r"^(советы|совет|на будущее)\s*:?\s*", "", tip, flags=re.I).strip()
+        if tip:
+            tips.append(tip)
+    if not tips:
+        return head
+    return f"{head}\nна будущее: {tips[0]}"
 
 
 class AIVerdict(BaseModel):
@@ -587,11 +617,14 @@ async def check_homework(homework_id, material=None):
     comment = verdict.comment_for_student.strip()
     if final_verdict == "accept" and verdict.verdict == "revise":
         # текст писался как «исправь…» — для принятия собираем его из советов
-        tips = "\n".join(f"• {t}" for t in verdict.suggestions[:3])
-        comment = "зачёт" + (f"\n\nна будущее:\n{tips}" if tips else "")
+        comment = "зачёт" + (f"\nна будущее: {verdict.suggestions[0]}" if verdict.suggestions else "")
+    if final_verdict == "accept":
+        comment = tidy_accept(comment)
     if PLAIN_STYLE_MARKER in (assignment["reference"] or "").lower():
         comment = plain_style(comment)
     note = " ".join(x for x in (guard_note, verdict.note_for_reviewer.strip()) if x)
+    if final_verdict == "accept" and len(verdict.suggestions) > 1:
+        note = "\n".join([note, "Советы ИИ (ученику не отправлены): " + "; ".join(verdict.suggestions[:5])]).strip()
     if material.cloud_summary:
         note = "\n".join([note] + material.cloud_summary).strip()
 
