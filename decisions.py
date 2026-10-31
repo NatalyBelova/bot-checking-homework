@@ -311,8 +311,16 @@ async def split_checklist(hw, version):
     who = hw["student_name"] or f"id:{student_id}"
     existing = await db.latest_homework_for_assignment(student_id, checklist["id"])
     if existing and existing["status"] in ("accepted", "new"):
-        # уже принят или уже проверяется — второй раз не заводим
-        return existing["status"] == "new"
+        # уже принят или уже проверяется — второй раз не заводим, но говорим об этом
+        child = await db.get_homework(existing["id"])
+        why = "уже принят" if existing["status"] == "accepted" else "уже на проверке"
+        log.info("ДЗ #%s: таблица есть, но чек-лист %s (ДЗ #%s)", hw["id"], why, existing["id"])
+        try:
+            await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица, но "
+                                        f"{homework_title(child)} {why} — повторно не отправляю.")
+        except Exception:
+            log.exception("Не удалось написать ученику %s про чек-лист", student_id)
+        return True
 
     text, files = version["text"] or "", version["files"]
     if existing:
