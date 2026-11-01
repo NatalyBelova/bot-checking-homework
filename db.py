@@ -1111,3 +1111,16 @@ def unlink_jira(student_id, account_id):
         cursor.execute("UPDATE jira_users SET student_id=NULL WHERE student_id=%s AND account_id=%s",
                        (student_id, account_id))
         return changed + cursor.rowcount
+
+
+@_async
+def get_version(version_id):
+    """Одна попытка: id, homework_id, text, files."""
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT id, homework_id, text FROM versions WHERE id=%s", (version_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("SELECT file_type, file_id FROM version_files WHERE version_id=%s ORDER BY id", (version_id,))
+        row["files"] = [tuple(f) for f in cursor.fetchall()]
+        return row

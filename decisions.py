@@ -397,9 +397,13 @@ async def split_checklist(hw, version):
         # уже принят — второй раз не заводим, но говорим об этом
         child = await db.get_homework(existing["id"])
         log.info("ДЗ #%s: таблица есть, но чек-лист уже принят (ДЗ #%s)", hw["id"], existing["id"])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🆕 Всё равно проверить таблицу как новую работу", callback_data=f"clnew_{version['id']}")]])
         try:
             await send_long(student_id, f"📊 В твоей отправке по {homework_title(hw)} есть таблица, но "
-                                        f"{homework_title(child)} уже принят — повторно не отправляю.")
+                                        f"{homework_title(child)} уже принят — повторно не отправляю.\n"
+                                        "Если это новая версия чек-листа и её нужно проверить, нажми кнопку ниже.",
+                            reply_markup=keyboard)
         except Exception:
             log.exception("Не удалось написать ученику %s про чек-лист", student_id)
         return True
@@ -415,3 +419,29 @@ async def split_checklist(hw, version):
         log.exception("Не удалось написать ученику %s про чек-лист", student_id)
     start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
     return True
+
+
+async def checklist_again(student_id, version_id):
+    """Ученик попросил проверить таблицу из сдачи блока ещё раз, хотя чек-лист уже принят."""
+    version = await db.get_version(version_id)
+    hw = await db.get_homework(version["homework_id"]) if version else None
+    if not hw or hw["student_id"] != student_id:
+        return None
+    checklists = [a for a in await db.list_assignments(active_only=True) if a["kind"] == "checklist"]
+    if not checklists:
+        return None
+    checklist = checklists[0]
+    existing = await db.latest_homework_for_assignment(student_id, checklist["id"])
+    text, files = version["text"] or "", version["files"]
+    who = hw["student_name"] or f"id:{student_id}"
+    if existing and existing["status"] in ("new", "revision"):
+        done = await add_to_existing(await db.get_homework(existing["id"]), text, files, who,
+                                     f" — таблица из сдачи {homework_title(hw)}")
+        if done:
+            return done
+    homework_id = await db.create_homework(student_id, checklist["id"], text, files, student_name=hw["student_name"])
+    child = await db.get_homework(homework_id)
+    header = f"🆕 Новое ДЗ #{homework_id} «{checklist['title']}» от {who} — таблица из сдачи {homework_title(hw)}"
+    log.info("ДЗ #%s: ученик попросил проверить таблицу ещё раз — ДЗ #%s", hw["id"], homework_id)
+    start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
+    return f"отправила таблицу на проверку как {homework_title(child)}. Результат придёт отдельно"

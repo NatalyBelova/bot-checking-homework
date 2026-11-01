@@ -304,6 +304,17 @@ async def _send(callback, choice=None):
     await callback.answer()
 
 
+@dp.callback_query(F.data.startswith("clnew_"))
+async def checklist_again(callback: types.CallbackQuery):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    done = await decisions.checklist_again(callback.from_user.id, int(callback.data.split("_")[1]))
+    if not done:
+        await callback.answer("Не нашла эту отправку", show_alert=True)
+        return
+    await callback.message.answer(f"📊 Готово: {done}.")
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "cancel_send")
 async def cancel_send(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
