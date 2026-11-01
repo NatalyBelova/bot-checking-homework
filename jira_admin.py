@@ -208,7 +208,10 @@ async def _account_label(link, names):
     if link["account_id"] not in names:
         names[link["account_id"]] = link["name"] or await jira.user_name(link["account_id"])
     name = names[link["account_id"]]
-    parts = [p for p in (name, link["email"]) if p]
+    email = link["email"]
+    if name and email and name.lower() in email.lower():
+        name = None  # Jira часто называет пользователя началом почты — не дублируем
+    parts = [p for p in (name, email) if p]
     return " · ".join(parts) if parts else f"accountId {link['account_id']}"
 
 
