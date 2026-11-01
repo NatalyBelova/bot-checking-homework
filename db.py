@@ -1068,3 +1068,46 @@ def latest_version_has_ai_review(homework_id):
             (homework_id,),
         )
         return cursor.fetchone()[0]
+
+
+@_async
+def jira_links(student_id=None):
+    """Кто из учеников с какими аккаунтами Jira связан: [{student_id, account_id, homeworks, email, name}]."""
+    where_h = "AND h.student_id=%s" if student_id else ""
+    where_u = "AND u.student_id=%s" if student_id else ""
+    params = [student_id, student_id] if student_id else []
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute(
+            f"""
+            WITH links AS (
+                SELECT h.student_id, h.jira_owner AS account_id FROM homeworks h
+                WHERE h.jira_owner IS NOT NULL {where_h}
+                UNION
+                SELECT u.student_id, u.account_id FROM jira_users u
+                WHERE u.student_id IS NOT NULL AND u.account_id IS NOT NULL AND u.removed_at IS NULL {where_u}
+            )
+            SELECT l.student_id, l.account_id,
+                   COALESCE(ARRAY(SELECT h.id FROM homeworks h WHERE h.student_id=l.student_id
+                                  AND h.jira_owner=l.account_id ORDER BY h.id), '{{}}') AS homeworks,
+                   (SELECT u.email FROM jira_users u WHERE u.account_id=l.account_id
+                    ORDER BY u.id DESC LIMIT 1) AS email,
+                   (SELECT u.display_name FROM jira_users u WHERE u.account_id=l.account_id
+                    ORDER BY u.id DESC LIMIT 1) AS name
+            FROM links l
+            ORDER BY l.student_id, l.account_id
+            """,
+            params,
+        )
+        return cursor.fetchall()
+
+
+@_async
+def unlink_jira(student_id, account_id):
+    """Забыть, что этот аккаунт Jira принадлежит ученику: следующая сдача блока 5 привяжет автора заново."""
+    with _cursor() as cursor:
+        cursor.execute("UPDATE homeworks SET jira_owner=NULL WHERE student_id=%s AND jira_owner=%s",
+                       (student_id, account_id))
+        changed = cursor.rowcount
+        cursor.execute("UPDATE jira_users SET student_id=NULL WHERE student_id=%s AND account_id=%s",
+                       (student_id, account_id))
+        return changed + cursor.rowcount

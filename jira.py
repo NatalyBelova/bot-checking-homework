@@ -399,3 +399,16 @@ async def issues_by_reporter(account_id, projects):
                 raise _admin_error(response.status, await _error_text(response))
             data = await response.json()
     return [i["key"] for i in data.get("issues", [])]
+
+
+async def user_name(account_id):
+    """Имя пользователя Jira по accountId (почту Jira часто скрывает). None — если не получилось."""
+    if not enabled():
+        return None
+    try:
+        async with _session() as session:
+            data = await _get_json(session, f"{_base()}/rest/api/3/user", params={"accountId": account_id})
+        return data.get("displayName") or None
+    except Exception as e:  # имя — только для удобства, без него всё работает
+        log.info("Jira: имя для %s не получено (%s)", account_id, e)
+        return None

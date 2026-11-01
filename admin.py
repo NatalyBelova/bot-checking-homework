@@ -185,6 +185,13 @@ async def student_card(callback: types.CallbackQuery):
         if len(buttons) < 30:
             buttons.append([_btn(f"Открыть {homework_title(hw)}"[:60], f"hw_{hw['id']}")])
 
+    if is_admin(callback.from_user.id):
+        import jira_admin  # здесь: jira_admin сам импортирует admin-утилиты
+        jira_text, jira_kb = await jira_admin.links_text(student_id)
+        if jira_text:
+            lines[2:2] = ["🔗" + jira_text.lstrip("•"), ""]
+            buttons = jira_kb.inline_keyboard + buttons
+
     await callback.message.answer(clip("\n".join(lines)),
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()

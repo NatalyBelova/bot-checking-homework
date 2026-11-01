@@ -3,6 +3,7 @@
 Админ присылает почту ученика — бот приглашает его в Jira. Когда ученик нашёл все баги,
 проверяющий одной кнопкой удаляет его из Jira вместе с оставшимися задачами.
 """
+import hashlib
 import re
 
 from aiogram import F, Router, types
@@ -12,7 +13,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import db
 import decisions
 import jira
-from common import clip, deny_callback, fmt_dt, is_admin, is_reviewer, log, student_label
+from common import BTN_JIRA, clip, deny_callback, fmt_dt, is_admin, is_reviewer, log, student_label
 
 router = Router()
 
@@ -192,3 +193,98 @@ async def final_cleanup(callback: types.CallbackQuery):
     for account_id, row in accounts:
         lines.append(await _remove_account(account_id, callback.from_user.id, row["email"]))
     await callback.message.answer(clip("\n".join(lines)))
+
+
+# ---------------------------------------------------------------------------
+# Какой аккаунт Jira связан с каким учеником (и отвязать)
+# ---------------------------------------------------------------------------
+
+def _short(account_id):
+    # accountId в Jira длинный, а callback_data — до 64 байт: в кнопке храним короткий отпечаток
+    return hashlib.sha1(account_id.encode()).hexdigest()[:10]
+
+
+async def _account_label(link, names):
+    if link["account_id"] not in names:
+        names[link["account_id"]] = link["name"] or await jira.user_name(link["account_id"])
+    name = names[link["account_id"]]
+    parts = [p for p in (name, link["email"]) if p]
+    return " · ".join(parts) if parts else f"accountId {link['account_id']}"
+
+
+async def links_text(student_id=None):
+    """Текст и кнопки «ученик в Telegram → аккаунт Jira». С student_id — только этот ученик."""
+    links = await db.jira_links(student_id)
+    if not links:
+        if student_id:
+            return None, None
+        return ("🔗 Пока ни один ученик не связан с аккаунтом Jira.\n\n"
+                "Связь появляется, когда ученик первый раз сдаёт блок 5: бот запоминает автора его задач "
+                "и дальше засчитывает только задачи этого автора."), None
+    lines = [] if student_id else ["🔗 Кто из учеников какой аккаунт Jira использует", ""]
+    rows, names = [], {}
+    for link in links:
+        student = student_label(link["student_id"], await db.get_student_name(link["student_id"]))
+        account = await _account_label(link, names)
+        hws = ", ".join(f"#{h}" for h in link["homeworks"]) or "добавлен через /jira"
+        lines.append(f"• {student} (id {link['student_id']}) → Jira: {account} · ДЗ {hws}")
+        rows.append([_btn(f"🔓 Отвязать {student} от {account}"[:60],
+                          f"jul_{link['student_id']}_{_short(link['account_id'])}")])
+    if not student_id:
+        lines += ["", "Бот засчитывает ученику только задачи его аккаунта Jira. Если ученик сменил аккаунт "
+                      "(или это тест), отвяжи — следующая сдача блока 5 привяжет нового автора."]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("jira_links"), _admin)
+@router.message(F.text == BTN_JIRA, _admin)
+async def links_command(message: types.Message):
+    text, keyboard = await links_text()
+    await message.answer(clip(text), reply_markup=keyboard)
+
+
+async def _find_link(student_id, short):
+    for link in await db.jira_links(student_id):
+        if _short(link["account_id"]) == short:
+            return link
+    return None
+
+
+@router.callback_query(F.data.startswith("jul_"))
+async def unlink_ask(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    _, student_id, short = callback.data.split("_", 2)
+    link = await _find_link(int(student_id), short)
+    if not link:
+        await callback.answer("Уже отвязан", show_alert=True)
+        return
+    student = student_label(link["student_id"], await db.get_student_name(link["student_id"]))
+    account = await _account_label(link, {})
+    await callback.message.answer(
+        f"Отвязать {student} от аккаунта Jira {account}?\n\n"
+        "В Jira ничего не удаляется. Бот просто забудет связь: при следующей сдаче блока 5 он привяжет "
+        "автора присланных задач заново.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            _btn("🔓 Да, отвязать", f"julok_{student_id}_{short}"), _btn("Отмена", "jrmno")]]))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("julok_"))
+async def unlink_confirm(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
+    _, student_id, short = callback.data.split("_", 2)
+    link = await _find_link(int(student_id), short)
+    if not link:
+        await callback.message.answer("Уже отвязан")
+        return
+    await db.unlink_jira(link["student_id"], link["account_id"])
+    student = student_label(link["student_id"], await db.get_student_name(link["student_id"]))
+    log.info("Jira: %s отвязан от %s админом %s", link["student_id"], link["account_id"], callback.from_user.id)
+    await callback.message.answer(f"✅ {student} отвязан от аккаунта Jira. Следующая сдача блока 5 привяжет "
+                                  "автора задач заново.")

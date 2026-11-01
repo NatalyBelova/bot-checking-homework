@@ -123,6 +123,7 @@ BTN_PENDING = "🕐 Ждут проверки"
 BTN_STUDENTS = "👥 Ученики"
 BTN_EXPORT = "📥 Выгрузка в Excel"
 BTN_SETTINGS = "⚙️ Настройки ИИ"
+BTN_JIRA = "🔗 Jira: кто чей"
 
 
 def staff_keyboard(user_id):
@@ -131,7 +132,7 @@ def staff_keyboard(user_id):
         rows = [
             [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_PENDING)],
             [KeyboardButton(text=BTN_STUDENTS), KeyboardButton(text=BTN_EXPORT)],
-            [KeyboardButton(text=BTN_SETTINGS)],
+            [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_JIRA)],
         ]
     elif is_reviewer(user_id):
         rows = [[KeyboardButton(text=BTN_PENDING)]]
