@@ -25,11 +25,14 @@ bot = Bot(token=TOKEN)
 
 BTN_NEW = "📤 Отправить новое ДЗ"
 BTN_MY = "📋 Мои ДЗ"
+BTN_SUPPORT = "🆘 Поддержка"
 
 # Состояния (хранятся в таблице user_states и переживают перезапуск бота)
 SUBMIT = "submit"  # ученик собирает отправку: data = {mode, assignment_id|homework_id, text, files}
 REVIEW = "review"  # проверяющий пишет комментарий: data = {homework_id, action, text, files}
 REFERENCE = "reference"  # админ задаёт эталон задания: data = {assignment_id, text, files}
+SUPPORT = "support"  # ученик пишет в поддержку: data = {}
+SUPPORT_REPLY = "support_reply"  # проверяющий отвечает на обращение: data = {ticket_id}
 
 STATUS_LABELS = {
     "new": "🕐 На проверке",
@@ -179,7 +182,7 @@ async def send_long(chat_id, text, reply_markup=None):
 
 def student_keyboard():
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY)]],
+        keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_SUPPORT)]],
         resize_keyboard=True,
     )
 

@@ -8,8 +8,9 @@ import admin
 import db
 import decisions
 import jira_admin
+import support
 from common import (
-    ALBUM_DELAY, BTN_MY, BTN_NEW, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT,
+    ALBUM_DELAY, BTN_MY, BTN_NEW, BTN_SUPPORT, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT, SUPPORT, SUPPORT_REPLY,
     _acting_as_student, _albums, _idle_albums, _user_locks,
     bot, clip, deny_callback, extract_content, gather_album, get_user_display,
     homework_title, submit_hint, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
@@ -45,6 +46,7 @@ async def start(message: types.Message):
             "/jira — люди в Jira: добавить по почте, удалить (админ)",
             "/addtask Название — добавить задание",
             "/hw номер — история ДЗ",
+            "🆘 Вопросы учеников из «Поддержки» приходят проверяющим — отвечай кнопкой «✉️ Ответить»",
             "/cancel — сбросить текущее действие",
         ]
         if DEV_MODE and user_id in REVIEWERS + ADMINS:
@@ -556,6 +558,9 @@ async def handle_message(message: types.Message):
     if message.text == BTN_NEW:
         await start_new_homework(message)
         return
+    if message.text == BTN_SUPPORT:
+        await support.start_support(message)
+        return
 
     state, _ = await db.get_state(user_id)
 
@@ -567,6 +572,12 @@ async def handle_message(message: types.Message):
         return
     if state == REFERENCE:
         await gather_album(message, admin.add_to_reference)
+        return
+    if state == SUPPORT:
+        await gather_album(message, support.receive_question)
+        return
+    if state == SUPPORT_REPLY:
+        await gather_album(message, support.receive_reply)
         return
 
     # альбом приходит пачкой — отвечаем один раз
@@ -602,6 +613,7 @@ async def handle_unknown_callback(callback: types.CallbackQuery):
 # порядок важен: сначала кнопки админа, потом «всё остальное»
 dp.include_router(admin.router)
 dp.include_router(jira_admin.router)
+dp.include_router(support.router)
 dp.include_router(fallback_router)
 
 

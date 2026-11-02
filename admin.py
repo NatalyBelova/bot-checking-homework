@@ -76,6 +76,9 @@ async def stats(message: types.Message):
     ]
     if o["avg_attempts"]:
         lines.append(f"В среднем попыток до принятия: {o['avg_attempts']}")
+    tickets = await db.open_tickets()
+    if tickets:
+        lines.append(f"🆘 Вопросов в поддержке без ответа: {len(tickets)} (список — «🕐 Ждут проверки»)")
 
     ai = await db.ai_stats()
     if settings.ai_mode() != "off" or ai["total"]:
@@ -100,6 +103,10 @@ async def stats(message: types.Message):
 
 @router.message(F.text == BTN_PENDING, _staff)
 async def pending(message: types.Message):
+    import support  # здесь: support импортирует common, как и admin
+    tickets_text, tickets_kb = await support.open_tickets_text()
+    if tickets_text:
+        await message.answer(clip(tickets_text), reply_markup=tickets_kb)
     rows = await db.list_pending(limit=30)
     if not rows:
         await message.answer("🎉 Все ДЗ проверены, очередь пуста")

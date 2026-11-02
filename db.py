@@ -198,6 +198,20 @@ MIGRATIONS = [
         removed_by TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS support_tickets (
+        id SERIAL PRIMARY KEY,
+        student_id BIGINT NOT NULL,
+        student_name TEXT,
+        text TEXT,
+        files JSONB NOT NULL DEFAULT '[]'::jsonb,
+        status TEXT NOT NULL DEFAULT 'open',   -- open | answered | closed
+        answer TEXT,
+        answered_by BIGINT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        answered_at TIMESTAMP
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id)",
     "CREATE INDEX IF NOT EXISTS idx_versions_homework ON versions(homework_id)",
     "CREATE INDEX IF NOT EXISTS idx_version_files_version ON version_files(version_id)",
@@ -1124,3 +1138,42 @@ def get_version(version_id):
         cursor.execute("SELECT file_type, file_id FROM version_files WHERE version_id=%s ORDER BY id", (version_id,))
         row["files"] = [tuple(f) for f in cursor.fetchall()]
         return row
+
+
+@_async
+def add_ticket(student_id, student_name, text, files):
+    with _cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO support_tickets (student_id, student_name, text, files) VALUES (%s, %s, %s, %s) RETURNING id",
+            (student_id, student_name, text, Json(files)),
+        )
+        return cursor.fetchone()[0]
+
+
+@_async
+def get_ticket(ticket_id):
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT * FROM support_tickets WHERE id=%s", (ticket_id,))
+        return cursor.fetchone()
+
+
+@_async
+def close_ticket(ticket_id, by, answer=None):
+    """Отвечает или закрывает обращение. False — если его уже закрыли."""
+    with _cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE support_tickets
+            SET status=%s, answer=%s, answered_by=%s, answered_at=CURRENT_TIMESTAMP
+            WHERE id=%s AND status='open'
+            """,
+            ("answered" if answer else "closed", answer, by, ticket_id),
+        )
+        return cursor.rowcount == 1
+
+
+@_async
+def open_tickets():
+    with _cursor(dict_rows=True) as cursor:
+        cursor.execute("SELECT * FROM support_tickets WHERE status='open' ORDER BY id")
+        return cursor.fetchall()
