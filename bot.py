@@ -49,26 +49,20 @@ async def start(message: types.Message):
             "/hw номер — история ДЗ",
             "🆘 Вопросы учеников из «Поддержки» приходят проверяющим — отвечай кнопкой «✉️ Ответить»",
             "/cancel — сбросить текущее действие",
-            "/help — короткий гайд по боту",
         ]
+        if is_admin(user_id):
+            lines.append("/help — короткий гайд по боту")
         if DEV_MODE and user_id in REVIEWERS + ADMINS:
             lines.append("/switch — стать учеником (тестовый режим)")
         await message.answer("\n".join(lines), reply_markup=staff_keyboard(user_id))
         return
-    await message.answer("Выбери действие 👇\n/help — как сдать ДЗ", reply_markup=student_keyboard())
+    await message.answer("Выбери действие 👇", reply_markup=student_keyboard())
 
 
-@dp.message(Command("help"))
-@dp.message(F.text == BTN_HELP)
+@dp.message(Command("help"), F.from_user.id.in_(ADMINS))
+@dp.message(F.text == BTN_HELP, F.from_user.id.in_(ADMINS))
 async def help_command(message: types.Message):
-    user_id = message.from_user.id
-    if is_admin(user_id):
-        text = help_text.ADMIN + ("\n\n" + help_text.REVIEWER if is_reviewer(user_id) else "")
-    elif is_reviewer(user_id):
-        text = help_text.REVIEWER
-    else:
-        text = help_text.STUDENT
-    await send_long(user_id, text)
+    await send_long(message.from_user.id, help_text.ADMIN)
 
 
 @dp.message(Command("switch"))
