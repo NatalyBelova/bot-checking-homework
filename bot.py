@@ -11,7 +11,7 @@ import jira_admin
 import help_text
 import support
 from common import (
-    ALBUM_DELAY, BTN_HELP, BTN_MY, BTN_NEW, BTN_SUPPORT, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT, SUPPORT, SUPPORT_REPLY,
+    ALBUM_DELAY, BTN_HELP, BTN_MY, BTN_SWITCH, BTN_SWITCH_BACK, BTN_NEW, BTN_SUPPORT, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT, SUPPORT, SUPPORT_REPLY,
     _acting_as_student, _albums, _idle_albums, _user_locks,
     bot, clip, deny_callback, extract_content, gather_album, get_user_display,
     homework_title, submit_hint, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
@@ -56,7 +56,7 @@ async def start(message: types.Message):
             lines.append("/switch — стать учеником (тестовый режим)")
         await message.answer("\n".join(lines), reply_markup=staff_keyboard(user_id))
         return
-    await message.answer("Выбери действие 👇", reply_markup=student_keyboard())
+    await message.answer("Выбери действие 👇", reply_markup=student_keyboard(message.from_user.id))
 
 
 @dp.message(Command("help"), F.from_user.id.in_(ADMINS))
@@ -66,6 +66,7 @@ async def help_command(message: types.Message):
 
 
 @dp.message(Command("switch"))
+@dp.message(F.text.in_({BTN_SWITCH, BTN_SWITCH_BACK}))
 async def switch_role(message: types.Message):
     """Только для тестов: проверяющий переключается между ролями."""
     user_id = message.from_user.id
@@ -82,7 +83,7 @@ async def switch_role(message: types.Message):
         await message.answer(
             "🔁 Теперь ты ученик. Карточки ДЗ всё равно будут приходить сюда — "
             "чтобы нажать «Принять»/«Доработка», вернись через /switch",
-            reply_markup=student_keyboard(),
+            reply_markup=student_keyboard(user_id),
         )
 
 
@@ -92,7 +93,7 @@ async def cancel(message: types.Message):
     if is_staff(message.from_user.id):
         await message.answer("Действие сброшено", reply_markup=staff_keyboard(message.from_user.id))
     else:
-        await message.answer("Действие сброшено", reply_markup=student_keyboard())
+        await message.answer("Действие сброшено", reply_markup=student_keyboard(message.from_user.id))
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +286,7 @@ async def _send(callback, choice=None):
         if hw and hw["student_id"] == user.id and hw["status"] in ("new", "revision"):
             done = await decisions.add_to_existing(hw, text, files, user_display)
         if done:
-            await callback.message.answer(f"Готово ✅ {done[:1].upper()}{done[1:]}.", reply_markup=student_keyboard())
+            await callback.message.answer(f"Готово ✅ {done[:1].upper()}{done[1:]}.", reply_markup=student_keyboard(user.id))
             await callback.answer()
             return
         # пока ученик выбирал, ДЗ проверили — отправляем отдельной работой, чтобы ничего не потерялось
@@ -309,7 +310,7 @@ async def _send(callback, choice=None):
         decisions.start_processing(homework_id, f"{header}\n\n{text}".strip(), files)
         await callback.message.answer(
             f"ДЗ #{homework_id} отправлено на проверку ✅\n\nМожешь отправить ещё одно 👇",
-            reply_markup=student_keyboard(),
+            reply_markup=student_keyboard(user.id),
         )
 
     await callback.answer()
@@ -330,7 +331,7 @@ async def checklist_again(callback: types.CallbackQuery):
 async def cancel_send(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     await db.clear_state(callback.from_user.id)
-    await callback.message.answer("Отправка отменена ❌", reply_markup=student_keyboard())
+    await callback.message.answer("Отправка отменена ❌", reply_markup=student_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -610,7 +611,7 @@ async def handle_message(message: types.Message):
         await message.answer("Ожидай новое ДЗ от ученика ✏️", reply_markup=staff_keyboard(user_id))
     else:
         await message.answer("Нажми кнопку «📤 Отправить новое ДЗ», чтобы начать 👇",
-                             reply_markup=student_keyboard())
+                             reply_markup=student_keyboard(user_id))
 
 
 @fallback_router.callback_query()

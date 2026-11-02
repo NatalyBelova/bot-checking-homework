@@ -40,7 +40,7 @@ async def start_support(message: types.Message):
 async def cancel_support(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     await db.clear_state(callback.from_user.id)
-    await callback.message.answer("Отменено", reply_markup=student_keyboard())
+    await callback.message.answer("Отменено", reply_markup=student_keyboard(callback.from_user.id))
     await callback.answer()
 
 
@@ -62,7 +62,7 @@ async def receive_question(messages):
     text, files = extract_content(messages)
     if not (text or files):
         await bot.send_message(user.id, "Пустое сообщение — нажми «🆘 Поддержка» ещё раз и напиши вопрос.",
-                               reply_markup=student_keyboard())
+                               reply_markup=student_keyboard(user.id))
         return
     who = get_user_display(user)
     ticket_id = await db.add_ticket(user.id, who, text, files)
@@ -76,7 +76,7 @@ async def receive_question(messages):
         except Exception:
             log.exception("Не удалось отправить обращение #%s проверяющему %s", ticket_id, reviewer)
     await bot.send_message(user.id, "✅ Вопрос отправлен. Ответ придёт сюда, в этот чат.",
-                           reply_markup=student_keyboard())
+                           reply_markup=student_keyboard(user.id))
 
 
 @router.callback_query(F.data.startswith("supr_"))

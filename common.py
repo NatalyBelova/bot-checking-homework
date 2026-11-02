@@ -16,7 +16,7 @@ from aiogram.types import (
 from datetime import timezone
 from zoneinfo import ZoneInfo
 
-from config import ADMINS, REVIEWERS, TIMEZONE, TOKEN
+from config import ADMINS, DEV_MODE, REVIEWERS, TIMEZONE, TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("homework_bot")
@@ -128,6 +128,8 @@ BTN_EXPORT = "📥 Выгрузка в Excel"
 BTN_SETTINGS = "⚙️ Настройки ИИ"
 BTN_JIRA = "🔗 Jira: кто чей"
 BTN_HELP = "❓ Помощь"
+BTN_SWITCH = "🔁 Стать учеником"
+BTN_SWITCH_BACK = "🔁 Вернуться в свою роль"
 
 
 def staff_keyboard(user_id):
@@ -143,6 +145,8 @@ def staff_keyboard(user_id):
         rows = [[KeyboardButton(text=BTN_PENDING)]]
     else:
         return None
+    if DEV_MODE:
+        rows.append([KeyboardButton(text=BTN_SWITCH)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -182,11 +186,11 @@ async def send_long(chat_id, text, reply_markup=None):
         await bot.send_message(chat_id, part, reply_markup=reply_markup if i == len(parts) - 1 else None)
 
 
-def student_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_SUPPORT)]],
-        resize_keyboard=True,
-    )
+def student_keyboard(user_id=None):
+    rows = [[KeyboardButton(text=BTN_NEW)], [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_SUPPORT)]]
+    if user_id in _acting_as_student:
+        rows.append([KeyboardButton(text=BTN_SWITCH_BACK)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def review_keyboard(homework_id, version_id=None):
