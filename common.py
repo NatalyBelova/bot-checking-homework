@@ -127,6 +127,7 @@ BTN_STUDENTS = "👥 Ученики"
 BTN_EXPORT = "📥 Выгрузка в Excel"
 BTN_SETTINGS = "⚙️ Настройки ИИ"
 BTN_JIRA = "🔗 Jira: кто чей"
+BTN_HELP = "❓ Помощь"
 
 
 def staff_keyboard(user_id):
@@ -136,9 +137,10 @@ def staff_keyboard(user_id):
             [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_PENDING)],
             [KeyboardButton(text=BTN_STUDENTS), KeyboardButton(text=BTN_EXPORT)],
             [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_JIRA)],
+            [KeyboardButton(text=BTN_HELP)],
         ]
     elif is_reviewer(user_id):
-        rows = [[KeyboardButton(text=BTN_PENDING)]]
+        rows = [[KeyboardButton(text=BTN_PENDING), KeyboardButton(text=BTN_HELP)]]
     else:
         return None
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)

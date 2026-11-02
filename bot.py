@@ -8,13 +8,14 @@ import admin
 import db
 import decisions
 import jira_admin
+import help_text
 import support
 from common import (
-    ALBUM_DELAY, BTN_MY, BTN_NEW, BTN_SUPPORT, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT, SUPPORT, SUPPORT_REPLY,
+    ALBUM_DELAY, BTN_HELP, BTN_MY, BTN_NEW, BTN_SUPPORT, REFERENCE, REVIEW, STATUS_LABELS, SUBMIT, SUPPORT, SUPPORT_REPLY,
     _acting_as_student, _albums, _idle_albums, _user_locks,
     bot, clip, deny_callback, extract_content, gather_album, get_user_display,
     homework_title, submit_hint, is_admin, is_reviewer, is_staff, log, merge_text, review_confirm_keyboard,
-    review_keyboard, staff_keyboard, student_keyboard, submit_keyboard,
+    review_keyboard, send_long, staff_keyboard, student_keyboard, submit_keyboard,
 )
 import settings
 from config import ADMINS, DEV_MODE, OPENAI_MODEL, REVIEWERS
@@ -48,12 +49,26 @@ async def start(message: types.Message):
             "/hw номер — история ДЗ",
             "🆘 Вопросы учеников из «Поддержки» приходят проверяющим — отвечай кнопкой «✉️ Ответить»",
             "/cancel — сбросить текущее действие",
+            "/help — короткий гайд по боту",
         ]
         if DEV_MODE and user_id in REVIEWERS + ADMINS:
             lines.append("/switch — стать учеником (тестовый режим)")
         await message.answer("\n".join(lines), reply_markup=staff_keyboard(user_id))
         return
-    await message.answer("Выбери действие 👇", reply_markup=student_keyboard())
+    await message.answer("Выбери действие 👇\n/help — как сдать ДЗ", reply_markup=student_keyboard())
+
+
+@dp.message(Command("help"))
+@dp.message(F.text == BTN_HELP)
+async def help_command(message: types.Message):
+    user_id = message.from_user.id
+    if is_admin(user_id):
+        text = help_text.ADMIN + ("\n\n" + help_text.REVIEWER if is_reviewer(user_id) else "")
+    elif is_reviewer(user_id):
+        text = help_text.REVIEWER
+    else:
+        text = help_text.STUDENT
+    await send_long(user_id, text)
 
 
 @dp.message(Command("switch"))
