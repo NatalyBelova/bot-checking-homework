@@ -82,7 +82,7 @@ async def switch_role(message: types.Message):
         _acting_as_student.add(user_id)
         await message.answer(
             "🔁 Теперь ты ученик. Карточки ДЗ всё равно будут приходить сюда — "
-            "чтобы нажать «Принять»/«Доработка», вернись через /switch",
+            "чтобы нажать «Принять»/«Доработка», вернись кнопкой «🔁 Вернуться в свою роль»",
             reply_markup=student_keyboard(user_id),
         )
 
