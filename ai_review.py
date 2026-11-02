@@ -163,33 +163,41 @@ def normalize_verdict(v: AIVerdict):
 JIRA_PROMPT = """\
 Это задание с баг-репортами в Jira. Ученик ищет баги на учебном сайте и заводит их в Jira. \
 В критериях есть список багов преподавателя: какие баги засчитываются, а какие нет (с ожидаемой \
-серьёзностью и приоритетом). Разбери КАЖДУЮ задачу ученика отдельно по шаблону:
+серьёзностью и приоритетом). Разбери КАЖДУЮ задачу ученика отдельно.
 
+Для проверяющего (ученик это не увидит):
 - bug_number: какой это баг из списка преподавателя (номер из списка). Сопоставляй по смыслу \
 (заголовок, шаги, фактический результат), а не по словам. Если такого бага в списке нет — null.
 - counts: true, если это баг из списка засчитываемых — даже если он плохо оформлен (тогда \
 перечисли правки в must_fix). counts зависит только от того, КАКОЙ это баг, а не от оформления. \
 Баги из списка незасчитываемых, баги не из списка и «не баги» — false.
-- поля шаблона (importance, title, description, environment, steps, expected, actual, screenshots, \
-priority, severity, visual, extra): по каждому одна короткая строка. Начинай с «✅», если всё \
-хорошо, с «❌», если это нужно исправить (и что именно), с «⚠️», если это совет. \
-importance — засчитывается ли баг и почему (не называй номер и не пересказывай список ученику). \
-priority и severity сравнивай с ожидаемыми из списка: грубое расхождение (на 2 уровня и больше) — \
-«❌», расхождение на соседний уровень — «⚠️». visual — читаемость и оформление задачи. \
-extra — грамматика, опечатки и прочее.
-- must_fix: только обязательные правки по критериям приёмки (пусто, если правок нет). Советы \
-с «⚠️» сюда не входят.
-- reviewer_note: коротко для проверяющего, если есть сомнения (можно пусто).
+- поля проверки (importance, title, description, environment, steps, expected, actual, screenshots, \
+priority, severity, visual, extra): по каждому одна короткая строка, «✅» — хорошо, «❌» — нужно \
+исправить (и что именно), «⚠️» — совет. priority и severity сравнивай с ожидаемыми из списка: \
+грубое расхождение (на 2 уровня и больше) — «❌», соседний уровень — «⚠️».
+- must_fix: только существенные правки, без которых баг нельзя принять (пусто, если правок нет). \
+Мелкие опечатки, оформление, соседний уровень серьёзности или приоритета — не must_fix.
+- reviewer_note: коротко, если есть сомнения (можно пусто).
 
-Не раскрывай ученику список багов преподавателя: в summary_for_student не упоминай, что список \
-существует, не называй баги «засчитываемыми/незасчитываемыми по списку» и не подсказывай, какие \
-баги ещё искать.
+Для ученика — student_comment, одно короткое предложение, с маленькой буквы, на «ты», без ключа задачи:
+- баг засчитан без правок — пусто;
+- нужны правки — что конкретно поправить и почему, например «поправь шаги, сейчас непонятно, как \
+воспроизвести ошибку»;
+- баг не засчитан — конкретная причина простыми словами, например «на скрине не видно ошибку, \
+которую ты описал» или «эта проблема не подходит под задание, найди другой баг».
+В student_comment не упоминай список багов преподавателя, эталон, шаблон, критерии, ИИ и проверку, \
+не пиши, что задача будет удалена. Не называй ожидаемую серьёзность или приоритет из списка \
+(«ожидалась Blocker»): если серьёзность реально неверная, объясни почему, например «тут скорее \
+Major, основной функционал продолжает работать». Пол ученика неизвестен: без глаголов прошедшего \
+времени с родом.
+
+Не делай вывод только по коду HTTP-ошибки без анализа обстоятельств. Не требуй дополнительных шагов \
+и скриншотов, если баг уже достаточно подтверждён. Не придумывай замечания, если объективных \
+проблем нет. Не утверждай, что проблема воспроизводится, если это не видно из материалов.
 Если задачу оценить нельзя (не открылась, пустая, это не баг-репорт), всё равно добавь её в bugs \
-с counts = false и объясни в importance.
-unsure = true — только если не можешь разобрать работу в целом (тогда посмотрит человек).
-summary_for_student — 1–2 предложения: общее впечатление, на «ты», без упоминания ИИ и без \
-служебных слов (must_fix, counts, bugs, «засчитываемые», «перечень», «зачётная категория»). Пол \
-ученика неизвестен: пиши без глаголов прошедшего времени с родом («в работе 3 задачи», а не «прислал»).
+с counts = false и объясни в student_comment.
+unsure = true — если данных недостаточно для уверенного решения хотя бы по одной задаче или работу \
+нельзя разобрать в целом: не выдумывай причину, работу посмотрит человек.
 """
 
 
@@ -210,13 +218,14 @@ class BugCheck(BaseModel):
     visual: str = Field(description="Визуальная составляющая")
     extra: str = Field(description="Дополнительные параметры: грамматика и т.д.")
     must_fix: List[str] = Field(description="Обязательные правки. Пусто, если баг-репорт можно принять.")
+    student_comment: str = Field(
+        description="Одно короткое предложение ученику: что поправить или почему баг не засчитан. Пусто, если засчитан.")
     reviewer_note: str = Field(description="Заметка для проверяющего. Можно пусто.")
 
 
 class JiraVerdict(BaseModel):
     bugs: List[BugCheck]
     unsure: bool
-    summary_for_student: str
     note_for_reviewer: str
 
 
@@ -227,10 +236,8 @@ TEMPLATE_FIELDS = [
     ("severity", "Серьезность"), ("visual", "Визуальная составляющая"),
     ("extra", "Дополнительные параметры"),
 ]
-REJECTED_TEXT = "Этот баг не идёт в зачёт: он некритичный или это не тот баг, который нужно найти."
-BUG_STATUS_STUDENT = {"counted": "✅ засчитан", "fix": "🔧 нужно доработать", "rejected": "❌ не засчитывается",
-                      "foreign": "🚫 не засчитывается"}
-FOREIGN_TEXT = "Эту задачу завёл другой человек. Засчитываются только баги, которые ты завёл в Jira сам."
+REJECTED_TEXT = "этот баг не подходит под задание, найди другой"
+FOREIGN_TEXT = "эту задачу завёл другой человек, засчитываются только баги, которые ты завёл сам"
 
 
 COUNTED_RANGE_RE = re.compile(r"Засчитываются\s*\(\s*№\s*(\d+)\s*[–—-]\s*(\d+)\s*\)")
@@ -256,6 +263,7 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
     for check in verdict.bugs:
         key = check.key.strip().upper()
         reason = ""
+        model_counts = check.counts
         if counted_set is not None:
             # засчитывается ли баг, решает список преподавателя, а не модель
             should = check.bug_number in counted_set
@@ -275,6 +283,7 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
                 seen[check.bug_number] = key
         issue = issues_by_key.get(key)
         result.append({"key": key, "bug_number": check.bug_number, "status": status, "reason": reason,
+                       "model_counts": model_counts,
                        "reporter_id": issue.reporter_id if issue else None,
                        "reporter_name": issue.reporter_name if issue else "",
                        "url": issue.url if issue else None, "check": check})
@@ -286,50 +295,63 @@ def judge_bugs(verdict: "JiraVerdict", already_counted: dict, issues_by_key: dic
 LEAK_RE = re.compile(r"засчитываем|незасчитыв|перечн|перечен|списк|зачётн|зачетн|must|counts|bug_number|bugs\b|эталон",
                      re.IGNORECASE)
 
-IMPORTANCE_TEXT = {
-    "counted": "✅ Значимый баг — засчитан.",
-    "fix": "✅ Значимый баг — засчитается, когда исправишь замечания ниже.",
-}
+def _bugs_word(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return "значимый баг"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "значимых бага"
+    return "значимых багов"
 
 
-def _student_field(bug, check, name):
-    # «Важность бага» ученику пишет код: текст модели может выдать, что у преподавателя есть список
-    if name == "importance":
-        return IMPORTANCE_TEXT[bug["status"]]
-    return getattr(check, name).strip() or "—"
+def _student_reason(bug):
+    """Короткая причина для ученика: от модели, если она не выдаёт список багов, иначе общая фраза."""
+    check = bug["check"]
+    text = (check.student_comment or "").strip().rstrip(".") if check else ""
+    if bug["status"] == "rejected":
+        if bug["reason"]:
+            return bug["reason"]
+        # причину модели показываем, только если модель сама считала баг незасчитываемым
+        if text and not bug.get("model_counts") and not LEAK_RE.search(text) and "удал" not in text.lower():
+            return text
+        return REJECTED_TEXT
+    if bug["status"] == "fix":
+        if text and not LEAK_RE.search(text):
+            return text
+        return "поправь: " + "; ".join(x.rstrip(".") for x in check.must_fix)
+    return ""
 
 
 def render_jira_comment(verdict, bugs, counted_total, required, problems=(), skipped=()):
-    head = f"Засчитано багов: {min(counted_total, required)} из {required}."
+    """Короткий ответ наставника: сколько засчитано, замечания только по проблемным задачам, что дальше."""
     if counted_total >= required:
-        head = f"🎉 Засчитано багов: {required} из {required} — задание выполнено!"
-    elif counted_total:
-        head += f" Найди ещё {required - counted_total}."
-    lines = [head]
-    summary = verdict.summary_for_student.strip()
-    if summary and not LEAK_RE.search(summary):
-        lines += ["", summary]
+        lines = [f"{required} из {required}, зачёт. всё нормально"]
+    else:
+        lines = [f"{counted_total} из {required} засчитано"]
+        accepted = [b["key"] for b in bugs if b["status"] == "counted"]
+        if accepted:
+            lines.append(", ".join(accepted) + " принимаю")
+    fixes = 0
     for b in bugs:
-        c = b["check"]
-        lines += ["", f"🐞 {b['key']} — {BUG_STATUS_STUDENT[b['status']]}"]
         if b["status"] == "foreign":
-            lines.append(FOREIGN_TEXT)
-            continue
-        if b["status"] == "rejected":
-            # причину от ИИ ученику не показываем: она может выдать список багов преподавателя
-            lines.append(b["reason"] or REJECTED_TEXT)
-            lines.append("Эту задачу удалим из Jira — поищи другой баг.")
-            continue
-        lines += [f"{label} — {_student_field(b, c, name)}" for name, label in TEMPLATE_FIELDS]
-        if b["status"] == "fix":
-            lines += ["Что исправить:"] + [f"• {x}" for x in c.must_fix]
-            lines.append("Исправь задачу в Jira и пришли ссылку на неё снова.")
-        else:
-            lines.append("Баг засчитан, задачу удалим из Jira.")
+            lines.append(f"{b['key']} не засчитываю, {FOREIGN_TEXT}")
+        elif b["status"] == "rejected":
+            lines.append(f"{b['key']} не засчитываю, {_student_reason(b)}")
+        elif b["status"] == "fix":
+            fixes += 1
+            lines.append(f"{b['key']} {_student_reason(b)}")
     if problems:
-        lines += ["", "Не получилось открыть: " + "; ".join(problems)]
+        lines.append("не получилось открыть: " + "; ".join(problems))
     if skipped:
-        lines += ["", "Уже засчитаны раньше: " + ", ".join(skipped)]
+        lines.append("уже засчитаны раньше: " + ", ".join(skipped))
+    if counted_total < required:
+        need = max(required - counted_total - fixes, 0)
+        todo = []
+        if fixes:
+            todo.append("поправить задачи в Jira")
+        if need:
+            todo.append(f"найти ещё {need} {_bugs_word(need)}")
+        todo.append("отправить на проверку")
+        lines.append("нужно " + (", ".join(todo[:-1]) + " и " + todo[-1] if len(todo) > 1 else todo[0]))
     return "\n".join(lines)
 
 
@@ -345,6 +367,11 @@ def render_jira_note(verdict, bugs, counted_total, required):
         extra = f" — {b['reason']}" if b["reason"] else ""
         note = b["check"].reviewer_note.strip()
         lines.append(f"• {b['key']} ({num}): {marks[b['status']]}{extra}" + (f" · {note}" if note else ""))
+        # разбор по 12 пунктам ученику не уходит — проверяющему показываем только замечания
+        for name, label in TEMPLATE_FIELDS:
+            value = (getattr(b["check"], name) or "").strip()
+            if value[:1] in ("❌", "⚠") or value.startswith("⚠️"):
+                lines.append(f"   {label}: {value}")
     if verdict.note_for_reviewer.strip():
         lines.append(verdict.note_for_reviewer.strip())
     return "\n".join(lines)
