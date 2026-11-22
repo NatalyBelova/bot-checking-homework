@@ -192,7 +192,9 @@ priority, severity, visual, extra): по каждому одна коротка�
 времени с родом.
 
 Не делай вывод только по коду HTTP-ошибки без анализа обстоятельств. Не требуй дополнительных шагов \
-и скриншотов, если баг уже достаточно подтверждён. Не придумывай замечания, если объективных \
+и скриншотов, если баг уже достаточно подтверждён. Прежде чем просить скриншот, лог Console или Network, \
+внимательно посмотри вложения (и их увеличенные половины): если там уже видно то, что описано в \
+фактическом результате — например пустой Network после нажатия кнопки, — доказательство есть. Не придумывай замечания, если объективных \
 проблем нет. Не утверждай, что проблема воспроизводится, если это не видно из материалов.
 Если задачу оценить нельзя (не открылась, пустая, это не баг-репорт), всё равно добавь её в bugs \
 с counts = false и объясни в student_comment.
@@ -410,6 +412,37 @@ def _image_part(mime, data):
     return {"type": "input_image", "image_url": f"data:{mime};base64,{b64}", "detail": "high"}
 
 
+WIDE_RATIO = 1.5      # широкий скриншот: страница + DevTools сбоку
+WIDE_MIN_WIDTH = 1600  # меньше — модель и так видит текст
+
+
+def wide_halves(data):
+    """Левая и правая половины широкого скриншота в полном разрешении (или []).
+
+    Модель ужимает картинку целиком, и на широком скрине мелкий текст сбоку (Network, Console)
+    становится нечитаемым. Половины отдельно сохраняют разрешение — так видно, что в Network пусто.
+    """
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        width, height = img.size
+        if width < WIDE_MIN_WIDTH or width / max(height, 1) < WIDE_RATIO:
+            return []
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        overlap = width // 10
+        halves = []
+        for box in ((0, 0, width // 2 + overlap, height), (width // 2 - overlap, 0, width, height)):
+            out = io.BytesIO()
+            img.crop(box).save(out, format="PNG")
+            halves.append(out.getvalue())
+        return halves
+    except Exception as e:  # без Pillow или на необычной картинке — просто без половин
+        log.info("Не удалось разрезать скриншот: %s", e)
+        return []
+
+
 def _text_part(text):
     return {"type": "input_text", "text": text}
 
@@ -545,6 +578,12 @@ async def build_input(hw, assignment, versions, material, already_counted=None):
             for i, (mime, data, filename) in enumerate(issue.images, start=1):
                 content.append(_text_part(f"Вложение к {issue.key} №{i} ({filename}):"))
                 content.append(_image_part(mime, data))
+                halves = wide_halves(data)
+                if halves:
+                    content.append(_text_part(
+                        f"То же вложение №{i} крупнее — левая и правая половины, чтобы был виден мелкий "
+                        "текст (DevTools, Network, Console):"))
+                    content += [_image_part("image/png", h) for h in halves]
 
     for name, text in material.texts:
         content.append(_text_part(
